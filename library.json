@@ -5,7 +5,7 @@
     "keywords": "neurai, depin, iot, esp32",
     "repository": {
         "type": "git",
-        "url": "https://github.com/NeuraiProject/neurai-depin-msg"
+        "url": "https://github.com/NeuraiProject/NeuraiDepinMsg"
     },
     "authors": [
         {
