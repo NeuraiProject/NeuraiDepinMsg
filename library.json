@@ -1,0 +1,24 @@
+{
+    "name": "NeuraiDepinMsg",
+    "version": "1.0.0",
+    "description": "A library to create Core-compatible DePIN messages on ESP32. Requires uNeurai library.",
+    "keywords": "neurai, depin, iot, esp32",
+    "repository": {
+        "type": "git",
+        "url": "https://github.com/NeuraiProject/neurai-depin-msg"
+    },
+    "authors": [
+        {
+            "name": "Asimov",
+            "email": "web@neurai.org",
+            "url": "https://neurai.org"
+        }
+    ],
+    "license": "MIT",
+    "homepage": "https://neurai.org",
+    "dependencies": {
+        "uNeurai": "^0.0.3"
+    },
+    "frameworks": "arduino",
+    "platforms": "espressif32"
+}

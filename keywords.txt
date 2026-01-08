@@ -1,0 +1,32 @@
+#######################################
+# Syntax Coloring Map for NeuraiDepinMsg
+#######################################
+
+#######################################
+# Datatypes (KEYWORD1)
+#######################################
+
+NeuraiDepinMsg	KEYWORD1
+NeuraiDepinClient	KEYWORD1
+DepinParams	KEYWORD1
+DepinMessageResult	KEYWORD1
+IncomingMessage	KEYWORD1
+
+#######################################
+# Methods and Functions (KEYWORD2)
+#######################################
+
+begin	KEYWORD2
+sendGroupMessage	KEYWORD2
+sendPrivateMessage	KEYWORD2
+receiveMessages	KEYWORD2
+buildDepinMessage	KEYWORD2
+wrapMessageForServer	KEYWORD2
+unwrapMessageFromServer	KEYWORD2
+decryptPayload	KEYWORD2
+getMyAddress	KEYWORD2
+setTimeout	KEYWORD2
+
+#######################################
+# Constants (LITERAL1)
+#######################################
