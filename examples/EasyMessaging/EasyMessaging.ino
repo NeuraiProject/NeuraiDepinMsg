@@ -13,7 +13,8 @@ const char* password = "Pass_Wifi";
 const char* rpcUrl = "url_rpc"; 
 String depinToken = "Name_Token";
 String myWIF = "Private_WIF_With_Token"; 
-int batchSize = 5; // [NEW] Configurable batch size 
+String destAddress = "Neurai_address_to_send_private";
+int batchSize = 5;
 
 // ==========================================
 
@@ -50,7 +51,7 @@ void setup() {
 
   // 5. Send test message (Private)
   Serial.println("Sending private message...");
-  String txid_priv = depin.sendPrivateMessage("NcHqETeGiPbHXrWcpL2hkPfpbBmNTfHWBW", "Secret hello!");
+  String txid_priv = depin.sendPrivateMessage(destAddress, "Secret hello!");
   if (txid_priv != "") {
     Serial.println("Private Success! TX: " + txid_priv);
   } else {
