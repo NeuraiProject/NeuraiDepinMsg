@@ -152,8 +152,6 @@ std::vector<IncomingMessage> NeuraiDepinClient::receiveMessages(uint64_t &lastTi
         return results;
     }
 
-    String serverEncHex = "";
-    bool isEncrypted = false;
     uint64_t maxTs = lastTimestamp;
 
     {
@@ -207,7 +205,6 @@ std::vector<IncomingMessage> NeuraiDepinClient::receiveMessages(uint64_t &lastTi
         if (result.is<JsonObject>() && result.containsKey("encrypted")) {
             if(_debug) Serial.println("DEBUG: Response is encrypted by Server Privacy Layer");
             const char* serverEncHex = result["encrypted"]; // zero-copy access
-            isEncrypted = true;
             
             String decryptedJson = NeuraiDepinMsg::decryptPayload(serverEncHex, _wif);
             

@@ -30,3 +30,22 @@ setTimeout	KEYWORD2
 #######################################
 # Constants (LITERAL1)
 #######################################
+
+#######################################
+# 2.0.0 codec / transport (KEYWORD1 = types, KEYWORD2 = functions)
+#######################################
+DepinReceivedMessage	KEYWORD1
+DepinTransport	KEYWORD1
+DepinRpcResult	KEYWORD1
+DepinTransportErr	KEYWORD1
+fromRpcFields	KEYWORD2
+parseDepinMessage	KEYWORD2
+verifyDepinMessage	KEYWORD2
+lastError	KEYWORD2
+lastErrorName	KEYWORD2
+limits	KEYWORD2
+setUrl	KEYWORD2
+setCACert	KEYWORD2
+setInsecure	KEYWORD2
+setMaxResponseBytes	KEYWORD2
+call	KEYWORD2
