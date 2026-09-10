@@ -8,29 +8,30 @@
 # here: it depends on Arduino/mbedTLS and is compiled for the ESP32 target.
 
 UNEURAI ?= ../../../../lib/uNeurai
+ARDUINOJSON ?= ../../../ESP32-testing/.pio/libdeps/lilygo-t-display-s3-dev/ArduinoJson
 LIB      = ../../src
 BUILD    = build
 
 CXX      = g++
 CC       = gcc
-CPPFLAGS = -I$(UNEURAI)/src -I$(LIB) -DUSE_STDONLY -DUXNA_TEST -g -O1 -Wall -Wextra -Wno-unused-parameter -Wno-write-strings
+CPPFLAGS = -I$(UNEURAI)/src -I$(LIB) -I$(ARDUINOJSON)/src -DUSE_STDONLY -DUXNA_TEST -g -O1 -Wall -Wextra -Wno-unused-parameter -Wno-write-strings
 CFLAGS   = -I$(UNEURAI)/src -g -O1
 
 UNEURAI_CPP = $(wildcard $(UNEURAI)/src/*.cpp)
 UNEURAI_C   = $(wildcard $(UNEURAI)/src/utility/trezor/*.c) $(wildcard $(UNEURAI)/src/utility/*.c)
-CODEC_CPP   = $(LIB)/DepinCodec.cpp
+LIB_CPP     = $(LIB)/DepinCodec.cpp $(LIB)/DepinAuth.cpp $(LIB)/DepinReply.cpp
 HOST_CPP    = DepinCryptoOpenSSL.cpp
-TEST_CPP    = test_codec.cpp
+TESTS       = test_codec test_auth
 
 OBJS = $(patsubst $(UNEURAI)/src/%.cpp,$(BUILD)/un/%.cpp.o,$(UNEURAI_CPP)) \
        $(patsubst $(UNEURAI)/src/%.c,$(BUILD)/un/%.c.o,$(UNEURAI_C)) \
-       $(BUILD)/DepinCodec.cpp.o $(BUILD)/DepinCryptoOpenSSL.cpp.o
+       $(patsubst $(LIB)/%.cpp,$(BUILD)/%.cpp.o,$(LIB_CPP)) $(BUILD)/DepinCryptoOpenSSL.cpp.o
 
 .PHONY: all run clean
-all: $(BUILD)/test_codec
+all: $(addprefix $(BUILD)/,$(TESTS))
 
-run: $(BUILD)/test_codec
-	./$(BUILD)/test_codec ../fixtures/vectors.txt
+run: all
+	@for t in $(TESTS); do echo "== $$t"; ./$(BUILD)/$$t ../fixtures/vectors.txt || exit 1; done
 
 $(BUILD)/un/%.cpp.o: $(UNEURAI)/src/%.cpp
 	@mkdir -p $(dir $@)
@@ -40,7 +41,7 @@ $(BUILD)/un/%.c.o: $(UNEURAI)/src/%.c
 	@mkdir -p $(dir $@)
 	$(CC) -c $(CFLAGS) -w $< -o $@
 
-$(BUILD)/DepinCodec.cpp.o: $(CODEC_CPP) $(LIB)/DepinCodec.h $(LIB)/DepinCrypto.h
+$(BUILD)/%.cpp.o: $(LIB)/%.cpp $(LIB)/DepinCodec.h $(LIB)/DepinCrypto.h $(LIB)/DepinAuth.h $(LIB)/DepinReply.h
 	@mkdir -p $(dir $@)
 	$(CXX) -c $(CPPFLAGS) $< -o $@
 
@@ -48,8 +49,8 @@ $(BUILD)/DepinCryptoOpenSSL.cpp.o: $(HOST_CPP) $(LIB)/DepinCrypto.h
 	@mkdir -p $(dir $@)
 	$(CXX) -c $(CPPFLAGS) $< -o $@
 
-$(BUILD)/test_codec: $(TEST_CPP) $(OBJS) $(LIB)/DepinCodec.h
-	$(CXX) $(CPPFLAGS) $(TEST_CPP) $(OBJS) -lcrypto -o $@
+$(BUILD)/test_%: test_%.cpp $(OBJS) $(LIB)/DepinCodec.h $(LIB)/DepinAuth.h $(LIB)/DepinReply.h
+	$(CXX) $(CPPFLAGS) $< $(OBJS) -lcrypto -o $@
 
 clean:
 	rm -rf $(BUILD)

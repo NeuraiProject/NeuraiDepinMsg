@@ -52,7 +52,18 @@ enum class Err : uint8_t {
     BadField,           /* token / address / content empty or too long       */
     BadSignature,       /* DER malformed                                     */
     SignatureInvalid,   /* DER does not verify with the sender key           */
-    HashMismatch        /* announced hash != recomputed digest               */
+    HashMismatch,       /* announced hash != recomputed digest               */
+    /* authentication / replies (DepinAuth.h, DepinReply.h) */
+    BadPreimageField,   /* token/address/challenge/type unusable in a preimage */
+    RpcError,           /* JSON-RPC error object in the reply                */
+    BadJson,            /* container / body is not the expected JSON shape   */
+    BadReply,           /* wrapper: not exactly one of body|encrypted + poolsig */
+    ReplyKindMismatch,  /* got body where encrypted was expected, or vice versa */
+    PoolSigInvalid,     /* poolsig does not recover the pool key             */
+    PinRequired,        /* trust mode needs a pin that is not configured     */
+    PinMismatch,        /* announced key/root differ from the pin            */
+    ProtocolMismatch,   /* protocol != 2 / unsupported cipher                */
+    ServiceDisabled     /* enabled == false                                  */
 };
 const char * errName(Err e);
 
@@ -66,6 +77,8 @@ struct Limits {
     size_t maxToken        = 128;     /* DEPIN token name, bytes               */
     size_t maxAddress      = 64;      /* base58 address, bytes                 */
     size_t maxSignature    = 80;      /* DER                                   */
+    size_t maxReplyHex     = 131072;  /* body/encrypted hex string chars       */
+    size_t maxReplyJson    = 8192;    /* decoded plain-reply JSON bytes        */
 };
 const Limits & defaultLimits();
 

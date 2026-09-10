@@ -15,6 +15,8 @@
 #include <Arduino.h>
 #include <esp_heap_caps.h>
 #include "NeuraiDepinMsg.h"
+#include "DepinAuth.h"
+#include "DepinReply.h"
 #include "Message.h"
 #include "Conversion.h"
 #include "Hash.h"
@@ -109,6 +111,14 @@ static const char V_SENDER_PUBKEY[] PROGMEM =
   "02f737ef588350e23ab39b8cd8599ac45431e7f5cc4bd5d5c0172ef44bf0470728";
 
 
+
+static const char V_RECEIVE_NONCE[] PROGMEM =
+  "9bbd728c3e35285321c594a6925b537d743ad11da328163715363511deeae8ef";
+static const char V_CHALLENGE_POOLSIG[] PROGMEM =
+  "IEVB0i5eNa1/E0L7yr99MdrVbnYd21MqpemILA0NShpGXBQXSH3PobiKDo5rO6lI1PHSpzgz62/C1vw3lckcHg8=";
+static const char V_RECEIVE_POOLSIG[] PROGMEM =
+  "HwuCWkrExACb3QnCMyYjNMuagzLxEwDDncrpoAqPx4mgcoi7aXjRkQ0nJsEkNF3+EgEt7mPdeqFAqdaZsYhaH7M=";
+
 static int g_pass = 0, g_fail = 0;
 static void report(bool ok, const char * what) {
   if (ok) g_pass++; else g_fail++;
@@ -174,6 +184,33 @@ static void runVectors() {
     m.done();
     report(ok && String(depin::hexEncode(pub, 33).c_str()) == P(V_POOL_PUBKEY), "§13.3 poolsig recovers the pool key");
     report(verifyMessage(P(V_POOL_ADDRESS).c_str(), P(V_INFO_POOLSIG).c_str(), pre.c_str(), &NeuraiTest), "§13.3 poolsig verifies for the pool address"); }
+
+  /* §13.3–§13.5 through DepinReply: container -> poolsig -> open (phase 2) */
+  { PublicKey pool; depin::loadPublicKey(std::string(P(V_POOL_PUBKEY).c_str()), pool);
+    std::string rpc = "{\"result\":{\"body\":\"" + std::string(P(V_INFO_BODY).c_str()) + "\",\"poolsig\":\"" + std::string(P(V_INFO_POOLSIG).c_str()) + "\"},\"error\":null,\"id\":\"t1\"}";
+    depin::Pin pin; pin.serviceId = "test"; pin.rootToken = "&TEST"; pin.poolPubKeyHex = P(V_POOL_PUBKEY).c_str();
+    depin::BootstrapResult b;
+    Meter m("bootstrap RequirePin");
+    depin::Err e = depin::bootstrap(rpc, "t1", depin::TrustMode::RequirePin, pin, pin.serviceId, &NeuraiTest, b);
+    m.done();
+    report(e == depin::Err::Ok && b.pinConfirmed && b.info.maxRecipients == 20, "§13.3 bootstrap with a full pin");
+    depin::Pin wrong = pin; wrong.rootToken = "&OTHER";
+    report(depin::bootstrap(rpc, "t1", depin::TrustMode::RequirePin, wrong, pin.serviceId, &NeuraiTest, b) == depin::Err::PoolSigInvalid, "wrong pinned root rejected before decoding");
+    report(depin::bootstrap(rpc, "t1", depin::TrustMode::ExplicitTofu, depin::Pin(), "test", &NeuraiTest, b) == depin::Err::Ok && !b.pinConfirmed && b.candidate.rootToken == "&TEST", "TOFU candidate (unconfirmed)");
+    std::string rpcCh = "{\"result\":{\"encrypted\":\"" + std::string(P(V_CHALLENGE_ENCRYPTED).c_str()) + "\",\"poolsig\":\"" + std::string(P(V_CHALLENGE_POOLSIG).c_str()) + "\"},\"error\":null,\"id\":\"t1\"}";
+    depin::ReplyContext ch; ch.method = "depinchallenge"; ch.token = "&TEST/SEC"; ch.address = P(V_HOLDER_ADDRESS).c_str();
+    std::string json;
+    Meter m2("openReply bound (challenge)");
+    e = depin::openReply(rpcCh, "t1", ch, depin::ReplyKind::Bound, pool, &holder, json);
+    m2.done();
+    report(e == depin::Err::Ok && json == std::string(P(V_CHALLENGE_PLAIN).c_str()), "§13.4 bound challenge reply opens");
+    std::string rpcRx = "{\"result\":{\"encrypted\":\"" + std::string(P(V_RECEIVE_ENCRYPTED).c_str()) + "\",\"poolsig\":\"" + std::string(P(V_RECEIVE_POOLSIG).c_str()) + "\"},\"error\":null,\"id\":\"t1\"}";
+    depin::ReplyContext rc = ch; rc.method = "depinreceivemsg"; rc.challenge = P(V_RECEIVE_NONCE).c_str();
+    report(depin::openReply(rpcRx, "t1", rc, depin::ReplyKind::Bound, pool, &holder, json) == depin::Err::Ok && json == std::string(P(V_RECEIVE_PLAIN).c_str()), "§13.5 bound receive reply opens");
+    depin::ReplyContext n8 = rc; n8.challenge = "";
+    report(depin::openReply(rpcRx, "t1", n8, depin::ReplyKind::Bound, pool, &holder, json) == depin::Err::PoolSigInvalid, "N8 reply bound to its challenge");
+    std::string sig;
+    report(depin::signPreimage(holder, std::string(P(V_REQ_PREIMAGE).c_str()), sig) == depin::Err::Ok && sig == std::string(P(V_REQ_SIGNATURE).c_str()), "§13.2 DEPIN-REQ via DepinAuth"); }
 
   /* §13.4 / §13.5 ECIES */
   std::vector<uint8_t> pt;

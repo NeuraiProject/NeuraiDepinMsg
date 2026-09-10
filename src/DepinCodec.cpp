@@ -42,6 +42,16 @@ const char * errName(Err e) {
         case Err::BadSignature:       return "bad-signature";
         case Err::SignatureInvalid:   return "signature-invalid";
         case Err::HashMismatch:       return "hash-mismatch";
+        case Err::BadPreimageField:   return "bad-preimage-field";
+        case Err::RpcError:           return "rpc-error";
+        case Err::BadJson:            return "bad-json";
+        case Err::BadReply:           return "bad-reply";
+        case Err::ReplyKindMismatch:  return "reply-kind-mismatch";
+        case Err::PoolSigInvalid:     return "poolsig-invalid";
+        case Err::PinRequired:        return "pin-required";
+        case Err::PinMismatch:        return "pin-mismatch";
+        case Err::ProtocolMismatch:   return "protocol-mismatch";
+        case Err::ServiceDisabled:    return "service-disabled";
     }
     return "unknown";
 }
