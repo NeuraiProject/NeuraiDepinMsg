@@ -1,388 +1,132 @@
+#if defined(ESP32) || defined(ARDUINO_ARCH_ESP32)
+
 #include "NeuraiDepinClient.h"
+#include <sys/time.h>
+#include <time.h>
 
-NeuraiDepinClient::NeuraiDepinClient() {}
+/* ── glue: transport + clocks ────────────────────────────────────────────── */
 
-void NeuraiDepinClient::begin(String rpcUrl, String token, String wif) {
-    _rpcUrl = rpcUrl;
-    if (!_rpcUrl.endsWith("/")) _rpcUrl += "/";
-    if (!_rpcUrl.endsWith("rpc")) _rpcUrl += "rpc";
-
-    _token = token;
-    _wif = wif;
-
-    // Derive Keys once
-    PrivateKey privKey;
-    if (privKey.fromWIF(_wif.c_str()) != 0) {
-        _myAddress = privKey.address();
-        
-        PublicKey pub = privKey.publicKey();
-        uint8_t pubBytes[33];
-        pub.sec(pubBytes, 33);
-        
-        _myPubKey = "";
-        for(int i=0; i<33; i++) {
-            if(pubBytes[i] < 0x10) _myPubKey += "0";
-            _myPubKey += String(pubBytes[i], HEX);
-        }
+depin::RpcReply NeuraiDepinClient::Rpc::call(const std::string & method, const std::string & paramsJson, const std::string & id) {
+    depin::RpcReply out;
+    DepinRpcResult r = t.call(String(method.c_str()), String(paramsJson.c_str()), String(id.c_str()));
+    out.httpStatus = r.httpStatus;
+    out.retryAfterSec = r.retryAfterSec;
+    out.rateLimited = (r.err == DepinTransportErr::RateLimited);
+    out.ok = r.ok();
+    out.body.assign(r.body.c_str(), r.body.length());
+    if (!out.ok) out.transportError = depinTransportErrName(r.err);
+    if (*debug) {
+        Serial.printf("[depin] %s -> http %d %s, %u bytes\n", method.c_str(), r.httpStatus,
+                      depinTransportErrName(r.err), (unsigned)r.body.length());
     }
+    return out;
 }
 
-String NeuraiDepinClient::sendGroupMessage(String message) {
-    std::vector<String> recipients = fetchRecipients();
-    if (recipients.empty()) return "";
-
-    DepinParams params;
-    params.token = _token;
-    params.senderAddress = _myAddress;
-    params.senderPubKey = _myPubKey;
-    params.privateKey = _wif;
-    params.timestamp = time(nullptr);
-    params.message = message;
-    params.recipientPubKeys = recipients;
-    params.messageType = "group";
-
-    DepinMessageResult res = NeuraiDepinMsg::buildDepinMessage(params);
-    
-    String payload = res.hex;
-    String serverKey = getServerPubKey();
-    bool wrapped = false;
-    if (serverKey.length() > 0) {
-        payload = NeuraiDepinMsg::wrapMessageForServer(payload, serverKey);
-        wrapped = true;
-    }
-
-    return submitMessage(payload, wrapped);
+uint64_t NeuraiDepinClient::Clocks::unixMs() {
+    struct timeval tv;
+    if (gettimeofday(&tv, NULL) != 0) return 0;
+    return (uint64_t)tv.tv_sec * 1000ULL + (uint64_t)(tv.tv_usec / 1000);
 }
 
-String NeuraiDepinClient::sendPrivateMessage(String targetAddress, String message) {
-    if(_debug) Serial.println("DEBUG: sendPrivateMessage to " + targetAddress);
-    // 1. Get recipient public key
-    DynamicJsonDocument doc(64);
-    JsonArray params = doc.to<JsonArray>();
-    params.add(targetAddress);
-    
-    if(_debug) Serial.println("DEBUG: Fetching pubkey...");
-    String resJson = rpcCall("getpubkey", &params);
-    if(_debug) Serial.println("DEBUG: getpubkey response: " + resJson);
-    
-    DynamicJsonDocument resDoc(1024);
-    deserializeJson(resDoc, resJson);
-    
-    String targetPubKey = "";
-    if (resDoc["result"].is<JsonObject>()) {
-        targetPubKey = resDoc["result"]["pubkey"].as<String>();
-    } else {
-        targetPubKey = resDoc["result"].as<String>(); // Fallback for plain string response
-    }
+/* ── lifecycle ───────────────────────────────────────────────────────────── */
 
-    if(_debug) Serial.println("DEBUG: Target PubKey: " + targetPubKey);
-    if (targetPubKey.length() == 0) return "";
-
-    // 2. Build message
-    if(_debug) Serial.println("DEBUG: Building Depin Message...");
-    DepinParams p;
-    p.token = _token;
-    p.senderAddress = _myAddress;
-    p.senderPubKey = _myPubKey;
-    p.privateKey = _wif;
-    p.timestamp = time(nullptr);
-    p.message = message;
-    p.recipientPubKeys = { targetPubKey };
-    p.messageType = "private";
-
-    DepinMessageResult res = NeuraiDepinMsg::buildDepinMessage(p);
-    
-    String payload = res.hex;
-    String serverKey = getServerPubKey();
-    bool wrapped = false;
-    if (serverKey.length() > 0) {
-        payload = NeuraiDepinMsg::wrapMessageForServer(payload, serverKey);
-        wrapped = true;
-    }
-
-    return submitMessage(payload, wrapped);
+NeuraiDepinClient::NeuraiDepinClient()
+    : _rpc(_transport, &_debug), _core(_rpc, _clock) {
+    _cfg.net = &NeuraiTest;             /* protocol 2 is live on testnet/regtest */
+    _cfg.trust = depin::TrustMode::RequirePin;
 }
 
-std::vector<IncomingMessage> NeuraiDepinClient::receiveMessages(uint64_t &lastTimestamp, int limit, String lastHash) {
-    std::vector<IncomingMessage> results;
-    // 1. Prepare Request
-    WiFiClientSecure client;
-    client.setInsecure();
-    
-    HTTPClient http;
-    if (!http.begin(client, _rpcUrl)) return results;
-    
-    http.setTimeout(_timeout);
-    http.useHTTP10(true); // Disable chunked encoding, simpler for large streams
-    http.addHeader("Content-Type", "application/json");
-
-    DynamicJsonDocument reqDoc(1024);
-    reqDoc["jsonrpc"] = "2.0";
-    reqDoc["id"] = "esp32_receive";
-    reqDoc["method"] = "depinreceivemsg";
-    JsonArray reqParams = reqDoc.createNestedArray("params");
-    reqParams.add(_token);
-    reqParams.add(_myAddress);
-    reqParams.add(lastTimestamp);
-    
-    // If we use pagination params, we must send them
-    if (limit > 0 || lastHash.length() > 0) {
-        reqParams.add(lastHash);
-        reqParams.add(limit);
-    }
-
-    String reqBody;
-    serializeJson(reqDoc, reqBody);
-
-    // 2. Perform Request
-    // 2. Perform Request
-    int code = http.POST(reqBody);
-    
-    if(_debug) {
-        Serial.println("DEBUG: RPC Call -> depinreceivemsg");
-        Serial.println("DEBUG: HTTP Code: " + String(code));
-        Serial.println("DEBUG: Free Heap before JSON: " + String(ESP.getFreeHeap()));
-        Serial.println("DEBUG: Max Alloc Heap: " + String(ESP.getMaxAllocHeap()));
-    }
-
-    if (code != 200) {
-        String errRes = http.getString();
-        if(_debug) Serial.println("DEBUG: Error Response: " + errRes);
-        http.end();
-        return results;
-    }
-
-    uint64_t maxTs = lastTimestamp;
-
-    {
-        // 3. Manual stream reading to ensure no truncation
-        // We read until the server closes the connection (HTTP/1.0 style)
-        String resJson = "";
-        resJson.reserve(128000); // Pre-allocate to avoid fragmentation
-        
-        WiFiClient *s = http.getStreamPtr();
-        uint32_t start = millis();
-        while ((http.connected() || s->available()) && (millis() - start < _timeout)) {
-            while (s->available()) {
-                char c = s->read();
-                resJson += c;
-                if (resJson.length() >= 127999) break; // Safety cap
-            }
-            delay(1); // Give OS some time
-        }
-        http.end(); 
-        
-        if(_debug) {
-            Serial.println("DEBUG: Raw Response Length: " + String(resJson.length()));
-            Serial.println("DEBUG: Free Heap after manual read: " + String(ESP.getFreeHeap()));
-        }
-        
-        if (resJson.length() > 64) {
-            if(_debug) Serial.println("DEBUG: End of response: " + resJson.substring(resJson.length() - 64));
-        }
-
-        if (resJson.length() > 60000) {
-             if(_debug) Serial.println("DEBUG: WARNING! Response length > 60000. ESP32 might have issues handling this size!");
-        }
-
-        DynamicJsonDocument resDoc(128000); 
-        DeserializationError error = deserializeJson(resDoc, resJson);
-        
-        if (error) {
-            if(_debug) Serial.println("DEBUG: JSON Deserialization Error: " + String(error.c_str()));
-            return results;
-        }
-        if(_debug) Serial.println("DEBUG: Free Heap after resDoc: " + String(ESP.getFreeHeap()));
-
-        if (!resDoc["error"].isNull()) {
-            if(_debug) Serial.println("DEBUG: RPC Error: " + resDoc["error"].as<String>());
-            return results;
-        }
-
-        JsonVariant result = resDoc["result"];
-        
-        // Handle Privacy Layer Wrapper
-        if (result.is<JsonObject>() && result.containsKey("encrypted")) {
-            if(_debug) Serial.println("DEBUG: Response is encrypted by Server Privacy Layer");
-            const char* serverEncHex = result["encrypted"]; // zero-copy access
-            
-            String decryptedJson = NeuraiDepinMsg::decryptPayload(serverEncHex, _wif);
-            
-            if (decryptedJson.length() > 0) {
-                DynamicJsonDocument innerDoc(128000); 
-                deserializeJson(innerDoc, decryptedJson);
-                decryptedJson = ""; // Free string memory
-                
-                // Privacy layer can return Array or Object (with messages)
-                JsonVariant decryptedResult = innerDoc.as<JsonVariant>();
-                JsonArray messages;
-
-                if (decryptedResult.is<JsonArray>()) {
-                    messages = decryptedResult.as<JsonArray>();
-                } else if (decryptedResult.is<JsonObject>() && decryptedResult.containsKey("messages")) {
-                     messages = decryptedResult["messages"].as<JsonArray>();
-                     // We could also capture "has_more" here if we wanted to return it
-                }
-
-                if(_debug) Serial.println("DEBUG: Found " + String(messages.size()) + " messages in wrapped response.");
-                
-                for (JsonObject msg : messages) {
-                    uint64_t ts = msg["timestamp"].as<uint64_t>();
-                    if (ts > maxTs) maxTs = ts;
-                    if (ts <= lastTimestamp && lastTimestamp != 0 && lastHash.length() == 0) continue; 
-                    // Note: If using pagination (lastHash set), we don't skip by timestamp strictly
-
-                    IncomingMessage im;
-                    if (msg.containsKey("hash")) im.hash = msg["hash"].as<String>();
-                    im.sender = msg["sender"].as<String>();
-                    im.timestamp = ts;
-                    im.type = msg["message_type"].as<String>();
-                    im.timeStr = getFormattedTime(ts);
-                    
-                    const char* pld = msg["encrypted_payload_hex"];
-                    im.content = NeuraiDepinMsg::decryptPayload(pld, _wif);
-                    im.decrypted = (im.content.length() > 0);
-                    results.push_back(im);
-                }
-            } else {
-                if(_debug) Serial.println("DEBUG: Failed to decrypt server wrapped response!");
-            }
-        } 
-        // Handle Standard Response (Array or Object)
-        else {
-             JsonArray messages;
-             if (result.is<JsonArray>()) {
-                 if(_debug) Serial.println("DEBUG: Response is plain Array");
-                 messages = result.as<JsonArray>();
-             } else if (result.is<JsonObject>() && result.containsKey("messages")) {
-                 if(_debug) Serial.println("DEBUG: Response is plain Object (Paginated)");
-                 messages = result["messages"].as<JsonArray>();
-                 // has_more is available: result["has_more"]
-             }
-
-             if(_debug) Serial.println("DEBUG: Found " + String(messages.size()) + " messages.");
-             
-             for (JsonObject msg : messages) {
-                uint64_t ts = msg["timestamp"].as<uint64_t>();
-                if (ts > maxTs) maxTs = ts;
-                // If not using precise pagination (lastHash), filter by older timestamp logic
-                if (ts <= lastTimestamp && lastTimestamp != 0 && lastHash.length() == 0) continue;
-
-                IncomingMessage im;
-                if (msg.containsKey("hash")) im.hash = msg["hash"].as<String>();
-                im.sender = msg["sender"].as<String>();
-                im.timestamp = ts;
-                im.type = msg["message_type"].as<String>();
-                im.timeStr = getFormattedTime(ts);
-                
-                const char* pld = msg["encrypted_payload_hex"];
-                if (pld) {
-                    im.content = NeuraiDepinMsg::decryptPayload(pld, _wif);
-                }
-                im.decrypted = (im.content.length() > 0);
-                results.push_back(im);
-            }
-        }
-    } // resDoc and resJson string go out of scope here
-    if(_debug) Serial.println("DEBUG: Free Heap after block 1: " + String(ESP.getFreeHeap()));
-
-    // Note: Privacy layer double-decryption block was redundant and removed as it was handled inside the first block
-    // The previous code had a duplicate block for `isEncrypted` check outside scope, but logically we can handle it all inside.
-    // However, if the first block's scope was to free `resJson`, then we should keep the logic clean.
-    // In my rewritten block above, I handled the decryption INSIDE the scope immediately to populate `results`.
-    
-    lastTimestamp = maxTs;
-    return results;
+void NeuraiDepinClient::setPoolPin(const String & poolPubKeyHex, const String & rootToken) {
+    _cfg.pin.poolPubKeyHex = std::string(poolPubKeyHex.c_str(), poolPubKeyHex.length());
+    _cfg.pin.rootToken = std::string(rootToken.c_str(), rootToken.length());
+    _cfg.trust = depin::TrustMode::RequirePin;
 }
 
-// Helpers
-String NeuraiDepinClient::rpcCall(String method, JsonArray* params) {
-    WiFiClientSecure client;
-    client.setInsecure();
-    HTTPClient http;
-    if (!http.begin(client, _rpcUrl)) return "";
-    
-    http.setTimeout(_timeout);
-    http.addHeader("Content-Type", "application/json");
-
-    DynamicJsonDocument doc(32768);
-    doc["jsonrpc"] = "2.0";
-    doc["id"] = "esp32_client";
-    doc["method"] = method;
-    if (params) {
-        JsonArray p = doc.createNestedArray("params");
-        for(JsonVariant v : *params) p.add(v);
-    }
-
-    String body;
-    serializeJson(doc, body);
-    
-    if(_debug) {
-        Serial.println("DEBUG: RPC Call -> " + method);
-        // Serial.println("DEBUG: Body -> " + body);
-    }
-    int code = http.POST(body);
-    if(_debug) Serial.println("DEBUG: HTTP Code: " + String(code));
-    
-    String res = http.getString();
-    http.end();
-
-    if (code != 200) {
-        if(_debug) Serial.println("DEBUG: Error Response: " + res);
-    }
-    return (code == 200) ? res : "";
+bool NeuraiDepinClient::begin(const String & rpcUrl, const String & token, const String & wif) {
+    if (!_transport.setUrl(rpcUrl)) return false;
+    _cfg.serviceId = std::string(_transport.url().c_str(), _transport.url().length());
+    _cfg.pin.serviceId = _cfg.serviceId;
+    _cfg.token = std::string(token.c_str(), token.length());
+    _lastCursor = ""; _lastShouldContinue = false;
+    return _core.begin(_cfg, std::string(wif.c_str(), wif.length())) == depin::Err::Ok;
 }
 
-std::vector<String> NeuraiDepinClient::fetchRecipients() {
-    std::vector<String> keys;
-    DynamicJsonDocument doc(64);
-    JsonArray params = doc.to<JsonArray>();
-    params.add(_token);
+bool NeuraiDepinClient::bootstrap() {
+    return _core.bootstrap() == depin::Err::Ok;
+}
 
-    String resJson = rpcCall("listdepinaddresses", &params);
-    DynamicJsonDocument resDoc(32768);
-    deserializeJson(resDoc, resJson);
-
-    JsonVariant result = resDoc["result"];
-    if (result.is<JsonArray>()) {
-        JsonArray entries = result.as<JsonArray>();
-        for (JsonObject entry : entries) {
-            if (entry.containsKey("pubkey")) keys.push_back(entry["pubkey"].as<String>());
-        }
+String NeuraiDepinClient::lastErrorDetail() const {
+    const depin::ClientError & e = _core.lastError();
+    String s(e.detail.c_str());
+    if (e.err == depin::Err::RpcError) {
+        s += " rpc "; s += e.rpc.code; s += ": "; s += e.rpc.message.c_str();
     }
-    return keys;
+    return s;
 }
 
-String NeuraiDepinClient::getServerPubKey() {
-    String resJson = rpcCall("depingetmsginfo");
-    DynamicJsonDocument resDoc(2048);
-    deserializeJson(resDoc, resJson);
-    return resDoc["result"]["depinpoolpkey"].as<String>();
+/* ── publishing ──────────────────────────────────────────────────────────── */
+
+String NeuraiDepinClient::sendGroupMessage(const String & message) {
+    depin::SendResult r;
+    if (_core.sendGroup(std::string(message.c_str(), message.length()), r) != depin::Err::Ok) return String("");
+    return String(r.hash.c_str());
 }
 
-String NeuraiDepinClient::submitMessage(String payload, bool isWrapped) {
-    DynamicJsonDocument doc(65535);
-    JsonArray params = doc.to<JsonArray>();
-    
-    if (isWrapped) {
-        JsonObject obj = params.createNestedObject();
-        obj["sender"] = _myAddress;
-        obj["encrypted"] = payload;
-    } else {
-        params.add(payload);
+String NeuraiDepinClient::sendPrivateMessage(const String & targetAddress, const String & message) {
+    depin::SendResult r;
+    if (_core.sendPrivate(std::string(targetAddress.c_str(), targetAddress.length()),
+                          std::string(message.c_str(), message.length()), r) != depin::Err::Ok) return String("");
+    return String(r.hash.c_str());
+}
+
+/* ── receiving ───────────────────────────────────────────────────────────── */
+
+String NeuraiDepinClient::fmtTime(uint64_t ts) {
+    time_t raw = (time_t)ts;
+    struct tm ti;
+    gmtime_r(&raw, &ti);
+    char buf[32];
+    strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", &ti);
+    return String(buf);
+}
+
+DepinPageResult NeuraiDepinClient::receivePage(const String & cursor, size_t limit) {
+    DepinPageResult out;
+    depin::ReceivePage page;
+    depin::Err e = _core.receivePage(std::string(cursor.c_str(), cursor.length()), limit, page);
+    out.ok = (e == depin::Err::Ok);
+    if (!out.ok) { out.nextCursor = cursor; return out; }
+    out.received = page.received;
+    out.rejected = page.rejected;
+    out.serverHasMore = page.serverHasMore;
+    out.shouldContinue = page.shouldContinue;
+    out.nextCursor = String(page.nextAfterHash.c_str());
+    out.messages.reserve(page.messages.size());
+    for (size_t i = 0; i < page.messages.size(); i++) {
+        const depin::ReceivedItem & it = page.messages[i];
+        IncomingMessage m;
+        m.sender = it.msg.sender.c_str();
+        m.timestamp = (uint64_t)it.msg.timestamp;
+        m.timeStr = fmtTime(m.timestamp);
+        m.type = (it.msg.type == DEPIN_TYPE_PRIVATE) ? "private" : "group";
+        m.token = it.msg.token.c_str();
+        m.hash = it.hash.c_str();
+        m.verified = it.verified;
+        m.decrypted = it.decrypted;
+        m.content.reserve(it.content.size());
+        for (size_t k = 0; k < it.content.size(); k++) m.content += (char)it.content[k];
+        out.messages.push_back(m);
     }
-
-    String resJson = rpcCall("depinsubmitmsg", &params);
-    DynamicJsonDocument resDoc(2048);
-    deserializeJson(resDoc, resJson);
-    return resDoc["result"].as<String>();
+    _lastCursor = out.nextCursor;
+    _lastShouldContinue = out.shouldContinue;
+    return out;
 }
 
-String NeuraiDepinClient::getFormattedTime(uint64_t timestamp) {
-    time_t rawTime = (time_t)timestamp;
-    struct tm timeinfo;
-    gmtime_r(&rawTime, &timeinfo);
-    char buffer[30];
-    strftime(buffer, 30, "%Y-%m-%d %H:%M:%S", &timeinfo);
-    return String(buffer);
+std::vector<IncomingMessage> NeuraiDepinClient::receiveMessages(uint64_t & lastTimestamp, int limit, String lastHash) {
+    DepinPageResult page = receivePage(lastHash, limit > 0 ? (size_t)limit : 0);
+    for (size_t i = 0; i < page.messages.size(); i++)
+        if (page.messages[i].timestamp > lastTimestamp) lastTimestamp = page.messages[i].timestamp;
+    return page.messages;
 }
+
+#endif /* ESP32 */

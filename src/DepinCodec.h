@@ -63,7 +63,19 @@ enum class Err : uint8_t {
     PinRequired,        /* trust mode needs a pin that is not configured     */
     PinMismatch,        /* announced key/root differ from the pin            */
     ProtocolMismatch,   /* protocol != 2 / unsupported cipher                */
-    ServiceDisabled     /* enabled == false                                  */
+    ServiceDisabled,    /* enabled == false                                  */
+    /* client (DepinClient.h) */
+    NotBootstrapped,    /* begin()/bootstrap() not done                       */
+    PinNotAccepted,     /* TOFU candidate pending acceptPin()                 */
+    ClockInvalid,       /* wall clock not set / not advancing                 */
+    Transport,          /* HTTP / TLS / timeout / size failure                */
+    RateLimited,        /* HTTP 429, see ClientError::retryAfterSec           */
+    RecipientsTruncated,/* node could not return the full holder set          */
+    KeyNotRevealed,     /* address has no revealed public key on chain        */
+    SubmitMismatch,     /* node confirmed a different hash / no success       */
+    ScopeMismatch,      /* row token outside the requested scope              */
+    ChallengeInvalid,   /* challenge reply malformed / expired                 */
+    BadPage             /* receive page JSON malformed                        */
 };
 const char * errName(Err e);
 

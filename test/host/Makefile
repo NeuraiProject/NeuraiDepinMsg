@@ -19,9 +19,9 @@ CFLAGS   = -I$(UNEURAI)/src -g -O1
 
 UNEURAI_CPP = $(wildcard $(UNEURAI)/src/*.cpp)
 UNEURAI_C   = $(wildcard $(UNEURAI)/src/utility/trezor/*.c) $(wildcard $(UNEURAI)/src/utility/*.c)
-LIB_CPP     = $(LIB)/DepinCodec.cpp $(LIB)/DepinAuth.cpp $(LIB)/DepinReply.cpp
+LIB_CPP     = $(LIB)/DepinCodec.cpp $(LIB)/DepinAuth.cpp $(LIB)/DepinReply.cpp $(LIB)/DepinClient.cpp
 HOST_CPP    = DepinCryptoOpenSSL.cpp
-TESTS       = test_codec test_auth
+TESTS       = test_codec test_auth test_client
 
 OBJS = $(patsubst $(UNEURAI)/src/%.cpp,$(BUILD)/un/%.cpp.o,$(UNEURAI_CPP)) \
        $(patsubst $(UNEURAI)/src/%.c,$(BUILD)/un/%.c.o,$(UNEURAI_C)) \
@@ -41,7 +41,7 @@ $(BUILD)/un/%.c.o: $(UNEURAI)/src/%.c
 	@mkdir -p $(dir $@)
 	$(CC) -c $(CFLAGS) -w $< -o $@
 
-$(BUILD)/%.cpp.o: $(LIB)/%.cpp $(LIB)/DepinCodec.h $(LIB)/DepinCrypto.h $(LIB)/DepinAuth.h $(LIB)/DepinReply.h
+$(BUILD)/%.cpp.o: $(LIB)/%.cpp $(LIB)/DepinCodec.h $(LIB)/DepinCrypto.h $(LIB)/DepinAuth.h $(LIB)/DepinReply.h $(LIB)/DepinClient.h
 	@mkdir -p $(dir $@)
 	$(CXX) -c $(CPPFLAGS) $< -o $@
 
@@ -49,7 +49,7 @@ $(BUILD)/DepinCryptoOpenSSL.cpp.o: $(HOST_CPP) $(LIB)/DepinCrypto.h
 	@mkdir -p $(dir $@)
 	$(CXX) -c $(CPPFLAGS) $< -o $@
 
-$(BUILD)/test_%: test_%.cpp $(OBJS) $(LIB)/DepinCodec.h $(LIB)/DepinAuth.h $(LIB)/DepinReply.h
+$(BUILD)/test_%: test_%.cpp $(OBJS) $(LIB)/DepinCodec.h $(LIB)/DepinAuth.h $(LIB)/DepinReply.h $(LIB)/DepinClient.h
 	$(CXX) $(CPPFLAGS) $< $(OBJS) -lcrypto -o $@
 
 clean:

@@ -52,6 +52,17 @@ const char * errName(Err e) {
         case Err::PinMismatch:        return "pin-mismatch";
         case Err::ProtocolMismatch:   return "protocol-mismatch";
         case Err::ServiceDisabled:    return "service-disabled";
+        case Err::NotBootstrapped:    return "not-bootstrapped";
+        case Err::PinNotAccepted:     return "pin-not-accepted";
+        case Err::ClockInvalid:       return "clock-invalid";
+        case Err::Transport:          return "transport";
+        case Err::RateLimited:        return "rate-limited";
+        case Err::RecipientsTruncated:return "recipients-truncated";
+        case Err::KeyNotRevealed:     return "key-not-revealed";
+        case Err::SubmitMismatch:     return "submit-mismatch";
+        case Err::ScopeMismatch:      return "scope-mismatch";
+        case Err::ChallengeInvalid:   return "challenge-invalid";
+        case Err::BadPage:            return "bad-page";
     }
     return "unknown";
 }

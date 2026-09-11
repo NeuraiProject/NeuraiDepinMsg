@@ -49,3 +49,24 @@ setCACert	KEYWORD2
 setInsecure	KEYWORD2
 setMaxResponseBytes	KEYWORD2
 call	KEYWORD2
+
+#######################################
+# 2.0.0 client (KEYWORD1 = types, KEYWORD2 = functions)
+#######################################
+NeuraiDepinClient	KEYWORD1
+DepinPageResult	KEYWORD1
+IncomingMessage	KEYWORD1
+setPoolPin	KEYWORD2
+setTrustMode	KEYWORD2
+setNetwork	KEYWORD2
+setPageLimit	KEYWORD2
+bootstrap	KEYWORD2
+ready	KEYWORD2
+acceptPin	KEYWORD2
+sendGroupMessage	KEYWORD2
+sendPrivateMessage	KEYWORD2
+receivePage	KEYWORD2
+receiveMessages	KEYWORD2
+lastReceiveCursor	KEYWORD2
+lastErrorDetail	KEYWORD2
+retryAfterSec	KEYWORD2
