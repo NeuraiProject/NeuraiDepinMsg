@@ -2,7 +2,7 @@
  * ProtocolVectors — runs the DePIN Messaging Protocol 2 vectors (spec §13,
  * Neurai/contrib/depin/vectors.txt) on the ESP32 itself, without network,
  * and reports heap / stack / timing. This is the phase-1 acceptance sketch
- * of NeuraiDepinMsg 2.0.0: every line must print PASS.
+ * of NeuraiDepinMsg: every check must print PASS.
  *
  * Validation target: ESP32-S3. Serial 115200. No Wi-Fi needed — the
  * ECIES *encryption* self-test therefore uses esp_fill_random() unseeded by
