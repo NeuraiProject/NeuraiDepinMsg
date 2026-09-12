@@ -43,7 +43,9 @@ void NeuraiDepinClient::setPoolPin(const String & poolPubKeyHex, const String & 
 }
 
 bool NeuraiDepinClient::begin(const String & rpcUrl, const String & token, const String & wif) {
-    if (!_transport.setUrl(rpcUrl)) return false;
+    // setUrl clears the URL on failure. Always reinitialize the core so an
+    // invalid URL reports BadArg and invalidates any previous ready session.
+    _transport.setUrl(rpcUrl);
     _cfg.serviceId = std::string(_transport.url().c_str(), _transport.url().length());
     _cfg.pin.serviceId = _cfg.serviceId;
     _cfg.token = std::string(token.c_str(), token.length());

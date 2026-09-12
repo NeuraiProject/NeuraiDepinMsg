@@ -372,11 +372,9 @@ Err DepinClient::ensureChallenge() {
     return _challengeValid ? Err::Ok : fail(Err::ChallengeInvalid, "ttl");
 }
 
-Err DepinClient::normaliseRow(const std::string & rowJson, ReceivedItem & item) {
+static Err normaliseRow(JsonObjectConst r, ReceivedItem & item, const Limits & limits) {
     item = ReceivedItem();
-    DynamicJsonDocument doc(rowJson.size() + 512);
-    if (deserializeJson(doc, rowJson) || doc.overflowed() || !doc.is<JsonObject>()) return Err::BadPage;
-    JsonObject r = doc.as<JsonObject>();
+    if (r.isNull()) return Err::BadPage;
     const char * tok = r["token"] | (const char *)NULL;
     const char * snd = r["sender"] | (const char *)NULL;
     const char * mt = r["message_type"] | (const char *)NULL;
@@ -392,16 +390,16 @@ Err DepinClient::normaliseRow(const std::string & rowJson, ReceivedItem & item) 
     else if (strcmp(mt, "group") == 0) m.type = DEPIN_TYPE_GROUP;
     else return Err::BadMessageType;
     size_t plLen = strlen(pl), sgLen = strlen(sg);
-    if (plLen / 2 > _cfg.limits.maxPayload || sgLen / 2 > _cfg.limits.maxSignature) return Err::TooLarge;
+    if (plLen / 2 > limits.maxPayload || sgLen / 2 > limits.maxSignature) return Err::TooLarge;
     m.payload.resize(plLen / 2); m.signature.resize(sgLen / 2);
     Err e;
     if (hexDecode(pl, plLen, m.payload.data(), m.payload.size(), &e) != m.payload.size()) return Err::BadHex;
     if (hexDecode(sg, sgLen, m.signature.data(), m.signature.size(), &e) != m.signature.size()) return Err::BadHex;
-    if ((e = messageDigest(m, _cfg.limits)) != Err::Ok) return e;
+    if ((e = messageDigest(m, limits)) != Err::Ok) return e;
     if (m.hash() != hs) return Err::HashMismatch;
     item.hash = hs;
     EciesView v;
-    return eciesParse(m.payload.data(), m.payload.size(), v, _cfg.limits);
+    return eciesParse(m.payload.data(), m.payload.size(), v, limits);
 }
 
 Err DepinClient::receivePage(const std::string & afterHash, size_t limit, ReceivePage & out) {
@@ -454,11 +452,9 @@ Err DepinClient::receivePage(const std::string & afterHash, size_t limit, Receiv
     }
 
     std::string lastHash;
-    for (JsonObject r : rows) {
-        std::string rowJson;
-        serializeJson(r, rowJson);
+    for (JsonObjectConst r : rows) {
         ReceivedItem item;
-        Err re2 = normaliseRow(rowJson, item);
+        Err re2 = normaliseRow(r, item, _cfg.limits);
         if (re2 != Err::Ok) { out.rejected++; continue; }       /* structurally invalid: no anchor from it */
         if (!lastHash.empty() && lastHash == item.hash) { out.rejected++; continue; }   /* duplicate */
         lastHash = item.hash;                                     /* examined row: transport cursor */

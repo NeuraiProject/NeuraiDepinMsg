@@ -160,7 +160,6 @@ private:
     Err ensureChallenge();
     Err send(const std::string & content, uint8_t type,
              const std::vector<std::vector<uint8_t> > & recipients, SendResult & out);
-    Err normaliseRow(const std::string & rowJson, ReceivedItem & item);
     void cachePut(const std::string & address, const std::string & hex);
 };
 
