@@ -164,6 +164,7 @@ not establish sender authenticity: verify the signature as well.
 
 ## Examples and validation
 
+- [Basic host tests](tests/README.md): codec, authentication, and client regression tests. After installing the documented dependencies, run `make -C tests run`. No board, node, or credentials are required.
 - [EasyMessaging](examples/EasyMessaging/EasyMessaging.ino): Wi-Fi client setup, publishing, and polling. Replace its Wi-Fi, WIF, token, pool-key, and CA placeholders with a consistent configuration. Its example token and key are not a verified pin for the public URL shown. Configure a CA for verified TLS; the sketch's insecure fallback is for lab use only.
 - [ProtocolVectors](examples/ProtocolVectors/ProtocolVectors.ino): offline protocol vectors with heap, stack, and timing output. Embedded keys are public regtest fixtures and must never hold funds.
 
@@ -175,7 +176,8 @@ the same messages against a real Neurai node running in Docker.
 
 These results cover the tested workloads. Public testnet operation, maximum
 payload/recipient sizing, and sustained hardware stress testing remain pending.
-Development test tools are maintained locally and are not included in this repository.
+The basic host suite is included in `tests/`. Docker and hardware integration
+tools are maintained separately in the local, unpublished `test/` directory.
 
 ## License
 
