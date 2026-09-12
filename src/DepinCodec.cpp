@@ -395,52 +395,86 @@ const uint8_t * eciesFindEntry(const EciesView & view, const uint8_t keyId[20]) 
 
 /* ── ECIES decrypt ───────────────────────────────────────────────────────── */
 
-Err eciesDecrypt(const uint8_t * data, size_t len, const PrivateKey & key,
-                 std::vector<uint8_t> & plaintext, const Limits & lim) {
-    plaintext.clear();
+namespace {
+class PrivateIdentity : public IdentityProvider {
+public:
+    explicit PrivateIdentity(const PrivateKey & key) : key_(key) {}
+    Err publicKey(uint8_t out[33]) const override {
+        PublicKey pub = key_.publicKey(); pub.compressed = true;
+        if (!pub.isValid()) return Err::BadPrivKey;
+        return pub.sec(out, 33) == 33 ? Err::Ok : Err::Crypto;
+    }
+    Err signDigest(const uint8_t digest[32], uint8_t der[72], size_t & length) const override {
+        length = 0;
+        Signature sig = key_.sign(digest);
+        if (!sig.isValid()) return Err::Crypto;
+        length = sig.der(der, 72);
+        return length ? Err::Ok : Err::Crypto;
+    }
+    Err ecdh(const uint8_t peer[33], uint8_t secret[32]) const override {
+        PublicKey pub;
+        Err e = loadPublicKey(peer, 33, pub);
+        return e == Err::Ok ? ecdhSecret(key_, pub, secret) : e;
+    }
+private:
+    const PrivateKey & key_;
+};
+} // namespace
+
+Err eciesDecrypt(const uint8_t * data, size_t len, const IdentityProvider & identity,
+                 uint8_t * plaintext, size_t capacity, size_t & written, const Limits & lim) {
+    written = 0;
     const CryptoBackend * cb = cryptoBackend();
     if (!cb) return Err::NoCryptoBackend;
-
     EciesView v;
     Err e = eciesParse(data, len, v, lim);
     if (e != Err::Ok) return e;
-
-    /* our key id */
-    PublicKey mine = key.publicKey();
-    mine.compressed = true;
-    if (!mine.isValid()) return Err::BadPrivKey;
+    const size_t ctLen = v.payloadLen - DEPIN_ECIES_NONCE_LEN - DEPIN_ECIES_TAG_LEN;
+    if (ctLen > lim.maxContent || ctLen > capacity) return Err::TooLarge;
+    if (ctLen && !plaintext) return Err::BadArg;
     uint8_t sec[33];
-    if (mine.sec(sec, 33) != 33) return Err::Crypto;
-    uint8_t keyId[20];
-    hash160(sec, 33, keyId);
-
+    if ((e = identity.publicKey(sec)) != Err::Ok) return e;
+    PublicKey mine;
+    if (loadPublicKey(sec, 33, mine) != Err::Ok) return Err::BadPubKey;
+    uint8_t keyId[20]; hash160(sec, 33, keyId);
     const uint8_t * entry = eciesFindEntry(v, keyId);
     if (!entry) return Err::NotForRecipient;
 
-    /* unwrap the content key */
-    PublicKey eph;
-    if (loadPublicKey(v.ephemeral, 33, eph) != Err::Ok) return Err::BadEphemeral;
-    uint8_t secret[32], wrapKey[32], contentKey[32];
-    if ((e = ecdhSecret(key, eph, secret)) != Err::Ok) return e;
+    uint8_t secret[32] = {}, wrapKey[32], contentKey[32];
+    e = identity.ecdh(v.ephemeral, secret);
+    if (e != Err::Ok) { secureWipe(secret, sizeof(secret)); return e; }
     kdfSha256(secret, 32, wrapKey, 32);
     secureWipe(secret, sizeof(secret));
-    bool ok = cb->aesGcmDecrypt(wrapKey, entry, entry + 12, 32, entry + 12 + 32, contentKey);
+    bool ok = cb->aesGcmDecrypt(wrapKey, entry, entry + 12, 32, entry + 44, contentKey);
     secureWipe(wrapKey, sizeof(wrapKey));
     if (!ok) { secureWipe(contentKey, sizeof(contentKey)); return Err::KeyUnwrapFailed; }
-
-    /* decrypt the payload: nonce(12) || ct || tag(16) */
-    size_t ctLen = v.payloadLen - DEPIN_ECIES_NONCE_LEN - DEPIN_ECIES_TAG_LEN;
-    if (ctLen > lim.maxContent) { secureWipe(contentKey, sizeof(contentKey)); return Err::TooLarge; }
-    plaintext.resize(ctLen);
     ok = cb->aesGcmDecrypt(contentKey, v.payload, v.payload + 12, ctLen,
-                           v.payload + 12 + ctLen, ctLen ? plaintext.data() : NULL);
+                          v.payload + 12 + ctLen, plaintext);
     secureWipe(contentKey, sizeof(contentKey));
-    if (!ok) {
-        if (ctLen) secureWipe(plaintext.data(), ctLen);
-        plaintext.clear();
-        return Err::PayloadAuthFailed;
-    }
+    if (!ok) { secureWipe(plaintext, ctLen); return Err::PayloadAuthFailed; }
+    written = ctLen;
     return Err::Ok;
+}
+
+Err eciesDecrypt(const uint8_t * data, size_t len, const IdentityProvider & identity,
+                 std::vector<uint8_t> & plaintext, const Limits & lim) {
+    plaintext.clear();
+    if (!cryptoBackend()) return Err::NoCryptoBackend;
+    EciesView v;
+    Err e = eciesParse(data, len, v, lim);
+    if (e != Err::Ok) return e;
+    const size_t count = v.payloadLen - DEPIN_ECIES_NONCE_LEN - DEPIN_ECIES_TAG_LEN;
+    if (count > lim.maxContent) return Err::TooLarge;
+    plaintext.resize(count);
+    size_t written;
+    e = eciesDecrypt(data, len, identity, plaintext.data(), plaintext.size(), written, lim);
+    if (e != Err::Ok) { secureWipe(plaintext.data(), plaintext.size()); plaintext.clear(); }
+    return e;
+}
+
+Err eciesDecrypt(const uint8_t * data, size_t len, const PrivateKey & key,
+                 std::vector<uint8_t> & plaintext, const Limits & lim) {
+    return eciesDecrypt(data, len, PrivateIdentity(key), plaintext, lim);
 }
 
 /* ── ECIES encrypt ───────────────────────────────────────────────────────── */
@@ -700,6 +734,35 @@ Err messageBuild(const std::string & token, const std::string & senderAddress,
     Err e = eciesEncrypt(content, contentLen, recipientPubKeys, out.payload, lim);
     if (e != Err::Ok) return e;
     return messageSign(out, senderKey, lim);
+}
+
+Err messageSign(DepinMessage & m, const IdentityProvider & identity, const Limits & lim) {
+    m.signature.clear();
+    Err e = messageDigest(m, lim);
+    if (e != Err::Ok) return e;
+    uint8_t sec[33];
+    if ((e = identity.publicKey(sec)) != Err::Ok) return e;
+    PublicKey pub;
+    if (loadPublicKey(sec, 33, pub) != Err::Ok) return Err::BadPubKey;
+    if (!pubKeyMatchesAddress(pub, m.sender)) return Err::BadPubKey;
+    uint8_t der[72] = {};
+    size_t length = 0;
+    if ((e = identity.signDigest(m.digest, der, length)) != Err::Ok) return e;
+    if (!length || length > sizeof(der) || length > lim.maxSignature) return Err::BadSignature;
+    m.signature.assign(der, der + length);
+    e = messageVerify(m, pub);
+    if (e != Err::Ok) m.signature.clear();
+    return e;
+}
+
+Err messageBuild(const std::string & token, const std::string & senderAddress,
+                 int64_t timestamp, uint8_t type, const uint8_t * content, size_t contentLen,
+                 const std::vector<std::vector<uint8_t> > & recipients,
+                 const IdentityProvider & identity, DepinMessage & out, const Limits & lim) {
+    out = DepinMessage();
+    out.token = token; out.sender = senderAddress; out.timestamp = timestamp; out.type = type;
+    Err e = eciesEncrypt(content, contentLen, recipients, out.payload, lim);
+    return e == Err::Ok ? messageSign(out, identity, lim) : e;
 }
 
 Err wrapForPool(const std::string & messageHex, const uint8_t poolPubKey33[33],

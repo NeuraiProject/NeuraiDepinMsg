@@ -1,4 +1,4 @@
-#if defined(ESP32) || defined(ARDUINO_ARCH_ESP32)
+#if (defined(ESP32) || defined(ARDUINO_ARCH_ESP32)) && !defined(NEURAI_DEPIN_NO_ARDUINO_CLIENT)
 
 #include "NeuraiDepinClient.h"
 #include <sys/time.h>

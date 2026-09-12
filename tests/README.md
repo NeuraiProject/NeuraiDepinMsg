@@ -6,7 +6,7 @@ simulated node. The test crypto backend uses OpenSSL instead of ESP32 mbedTLS.
 
 | Executable | Coverage |
 | --- | --- |
-| `test_codec` | Protocol vectors, serialization, encryption/decryption, signatures, recipient ordering, and malformed inputs |
+| `test_codec` | Protocol vectors, serialization, encryption/decryption, signatures, recipient ordering, external identity providers, and malformed inputs |
 | `test_auth` | Authentication preimages, pool pins, signed replies, and request/reply binding |
 | `test_client` | Bootstrap, group/private publication, challenges, pagination, malformed rows, and error handling |
 
@@ -40,7 +40,7 @@ Run `make -C tests clean` before switching dependency paths or compiler options.
 
 Each executable prints its check and failure counts and returns a nonzero
 status on failure. `make run` stops if any executable fails. The current suite
-contains 149 codec checks, 93 authentication checks, and 111 client checks.
+contains 169 codec checks, 93 authentication checks, and 111 client checks.
 
 `fixtures/vectors.txt` contains public regtest vectors, with their upstream
 source revision recorded in its header. These keys are test data and must

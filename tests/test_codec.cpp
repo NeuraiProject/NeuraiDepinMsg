@@ -451,6 +451,82 @@ static void test_message_build_and_wrap() {
     depinTestSetDeterministicRng(false, 0);
 }
 
+struct TestIdentity : IdentityProvider {
+    PrivateKey key;
+    bool locked = false, badSignature = false, oversized = false, failEcdh = false;
+    mutable int signs = 0, exchanges = 0;
+    explicit TestIdentity(const PrivateKey &k) : key(k) {}
+    Err publicKey(uint8_t out[33]) const override {
+        if (locked) return Err::BadPrivKey;
+        PublicKey pub = key.publicKey(); pub.compressed = true;
+        return pub.sec(out, 33) == 33 ? Err::Ok : Err::Crypto;
+    }
+    Err signDigest(const uint8_t digest[32], uint8_t der[72], size_t &n) const override {
+        ++signs; n = 0;
+        if (locked) return Err::BadPrivKey;
+        Signature sig = key.sign(digest); n = sig.der(der, 72);
+        if (badSignature) der[n - 1] ^= 1;
+        if (oversized) n = 73;
+        return Err::Ok;
+    }
+    Err ecdh(const uint8_t peer[33], uint8_t secret[32]) const override {
+        ++exchanges;
+        if (locked || failEcdh) return Err::BadPrivKey;
+        PublicKey p(peer); ECPoint shared = key * p; shared.compressed = true;
+        uint8_t sec[33];
+        if (!shared.isValid() || shared.sec(sec, 33) != 33) return Err::Crypto;
+        sha256(sec, 33, secret); return Err::Ok;
+    }
+};
+
+static void test_identity_provider() {
+    PrivateKey holder; CHECK_ERR(loadPrivateKey(V["holder_wif"], holder), Err::Ok, "provider fixture key");
+    TestIdentity identity(holder);
+    uint8_t pub[33]; identity.publicKey(pub);
+    vector<vector<uint8_t>> recipients(1, vector<uint8_t>(pub, pub + 33));
+    const string content = "provider message";
+    DepinMessage direct, external;
+    depinTestSetDeterministicRng(true, 1234);
+    CHECK_ERR(messageBuild("&TEST/SEC", V["holder_address"], 1787377444, DEPIN_TYPE_GROUP,
+        (const uint8_t*)content.data(), content.size(), recipients, holder, direct), Err::Ok, "direct message");
+    depinTestSetDeterministicRng(true, 1234);
+    CHECK_ERR(messageBuild("&TEST/SEC", V["holder_address"], 1787377444, DEPIN_TYPE_GROUP,
+        (const uint8_t*)content.data(), content.size(), recipients, identity, external), Err::Ok, "provider message");
+    vector<uint8_t> a,b; messageSerialize(direct,a); messageSerialize(external,b);
+    CHECK(a == b && identity.signs == 1, "provider produces identical signed wire bytes");
+    vector<uint8_t> plain;
+    CHECK_ERR(eciesDecrypt(external.payload.data(), external.payload.size(), identity, plain), Err::Ok, "provider decrypt");
+    CHECK(string(plain.begin(),plain.end()) == content, "provider plaintext");
+    uint8_t out[32]; memset(out,0xa5,sizeof(out)); size_t written = 99;
+    int before = identity.exchanges;
+    CHECK_ERR(eciesDecrypt(external.payload.data(), external.payload.size(), identity, out, 1, written), Err::TooLarge, "bounded output");
+    CHECK(!written && out[0] == 0xa5 && identity.exchanges == before, "capacity checked before ECDH");
+    vector<uint8_t> broken = external.payload; EciesView view;
+    eciesParse(broken.data(),broken.size(),view);
+    broken[(view.payload - broken.data()) + view.payloadLen - 1] ^= 1;
+    CHECK_ERR(eciesDecrypt(broken.data(),broken.size(),identity,out,sizeof(out),written), Err::PayloadAuthFailed, "provider tampered payload");
+    bool wiped = true; for (size_t i=0;i<content.size();++i) wiped &= out[i] == 0;
+    CHECK(!written && wiped && out[content.size()] == 0xa5, "failed plaintext wiped within bounds");
+    identity.locked = true;
+    CHECK_ERR(messageSign(external,identity), Err::BadPrivKey, "locked provider cannot sign");
+    CHECK(external.signature.empty(), "failed signing clears previous signature");
+    CHECK_ERR(eciesDecrypt(direct.payload.data(),direct.payload.size(),identity,plain), Err::BadPrivKey, "locked provider cannot decrypt");
+    CHECK(plain.empty(), "locked decrypt has no output");
+    identity.locked = false; identity.failEcdh = true;
+    CHECK_ERR(eciesDecrypt(direct.payload.data(),direct.payload.size(),identity,plain), Err::BadPrivKey, "ECDH refusal propagated");
+    identity.failEcdh = false; identity.badSignature = true;
+    CHECK(messageSign(external,identity) != Err::Ok && external.signature.empty(), "provider signature independently checked");
+    identity.badSignature = false; identity.oversized = true;
+    CHECK_ERR(messageSign(external,identity), Err::BadSignature, "oversized provider signature rejected");
+    identity.oversized = false; external.sender = V["pool_address"];
+    before = identity.signs;
+    CHECK_ERR(messageSign(external,identity), Err::BadPubKey, "provider bound to sender address");
+    CHECK(identity.signs == before, "wrong sender rejected before signing");
+    external.sender = V["holder_address"];
+    CHECK_ERR(messageSign(external,identity), Err::Ok, "provider recovers after refusal");
+    depinTestSetDeterministicRng(false,0);
+}
+
 int main(int argc, char ** argv) {
     const char * path = (argc > 1) ? argv[1] : "fixtures/vectors.txt";
     std::ifstream f(path);
@@ -465,6 +541,7 @@ int main(int argc, char ** argv) {
     if (V.count("challenge_encrypted") == 0) { printf("fixture incomplete\n"); return 2; }
     CHECK(cryptoBackend() != NULL, "crypto backend registered");
 
+    test_identity_provider();
     test_hex();
     test_compactsize();
     test_kdf();

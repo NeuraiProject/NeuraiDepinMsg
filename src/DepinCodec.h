@@ -145,6 +145,29 @@ Err eciesParse(const uint8_t * data, size_t len, EciesView & view, const Limits 
 /* Locate the 60-byte entry for `keyId` (hash160). NULL if absent. */
 const uint8_t * eciesFindEntry(const EciesView & view, const uint8_t keyId[20]);
 
+/* Borrowed identity operations: no private scalar or WIF crosses this boundary.
+ * Implementations must enforce their own authorization/readiness on every call.
+ * Calls are synchronous; the provider must remain alive and keep one identity
+ * stable during an operation. Outputs must not exceed the stated buffer sizes.
+ * ECDH returns SHA256(compressed SEC(private * peer)), not the raw X coordinate.
+ * The library does not retain the provider. It does not make it thread-safe. */
+class IdentityProvider {
+public:
+    virtual ~IdentityProvider() {}
+    virtual Err publicKey(uint8_t out[33]) const = 0;
+    virtual Err signDigest(const uint8_t digest[32], uint8_t der[72], size_t & length) const = 0;
+    virtual Err ecdh(const uint8_t peer[33], uint8_t secret[32]) const = 0;
+};
+
+Err eciesDecrypt(const uint8_t * data, size_t len, const IdentityProvider & identity,
+                 std::vector<uint8_t> & plaintext, const Limits & lim = defaultLimits());
+/* Caller-owned output avoids an intermediate plaintext allocation on devices.
+ * Output must not overlap the input. written is zero on failure; any plaintext
+ * written before authentication fails is securely wiped. */
+Err eciesDecrypt(const uint8_t * data, size_t len, const IdentityProvider & identity,
+                 uint8_t * plaintext, size_t capacity, size_t & written,
+                 const Limits & lim = defaultLimits());
+
 /* Decrypt for `key` (the holder). `plaintext` receives the content. */
 Err eciesDecrypt(const uint8_t * data, size_t len, const PrivateKey & key,
                  std::vector<uint8_t> & plaintext, const Limits & lim = defaultLimits());
@@ -181,6 +204,9 @@ Err messageSerialize(const DepinMessage & m, std::vector<uint8_t> & out, const L
 Err messageParse(const uint8_t * data, size_t len, DepinMessage & out, const Limits & lim = defaultLimits());
 /* Sign: computes the digest and fills `signature` (DER, low-S). */
 Err messageSign(DepinMessage & m, const PrivateKey & senderKey, const Limits & lim = defaultLimits());
+/* External signing checks the sender address against the provider public key
+ * and verifies the returned DER signature before reporting success. */
+Err messageSign(DepinMessage & m, const IdentityProvider & identity, const Limits & lim = defaultLimits());
 /* Verify `signature` against `senderPub` (33-byte SEC). High-S is normalised
  * like the node does. If `expectedHashHex` is given it must equal hash(). */
 Err messageVerify(const DepinMessage & m, const PublicKey & senderPub,
@@ -194,6 +220,14 @@ Err messageBuild(const std::string & token, const std::string & senderAddress,
                  const uint8_t * content, size_t contentLen,
                  const std::vector<std::vector<uint8_t> > & recipientPubKeys,
                  const PrivateKey & senderKey, DepinMessage & out,
+                 const Limits & lim = defaultLimits());
+
+/* Build with a borrowed external identity; no implicit sender recipient. */
+Err messageBuild(const std::string & token, const std::string & senderAddress,
+                 int64_t timestamp, uint8_t type,
+                 const uint8_t * content, size_t contentLen,
+                 const std::vector<std::vector<uint8_t> > & recipientPubKeys,
+                 const IdentityProvider & identity, DepinMessage & out,
                  const Limits & lim = defaultLimits());
 
 /* §8.3 step 5: the pool envelope wraps the ASCII hex of the signed message. */

@@ -162,6 +162,32 @@ Protocol 2 submission request**. A custom transport must also implement the
 pool envelope and authenticated RPC flow. Parsing or decrypting alone does
 not establish sender authenticity: verify the signature as well.
 
+## Wallet-owned identities
+
+The codec can use a `depin::IdentityProvider` instead of receiving a WIF or
+`PrivateKey`. Implement three synchronous operations: `publicKey()`,
+`signDigest()`, and `ecdh()`. Signing returns DER for the supplied 32-byte
+digest. ECDH returns SHA-256 of the compressed shared point, matching Neurai.
+
+Pass the provider to the `messageBuild()`, `messageSign()`, or `eciesDecrypt()`
+overloads. The library borrows it only for the duration of the call and does
+not retain private keys. The provider must enforce wallet readiness and
+permission checks on every operation and keep the identity stable during a
+call. This interface does not add thread synchronization or hardware isolation.
+Returned signatures are verified against the provider's public key and sender
+address before signing succeeds.
+
+For bounded embedded buffers, use the `eciesDecrypt()` overload taking an
+output pointer, capacity, and written length. It checks capacity before ECDH
+and wipes plaintext produced by a failed authentication attempt. Output and
+input buffers must not overlap.
+
+Applications with their own transport can define
+`NEURAI_DEPIN_NO_ARDUINO_CLIENT` globally to omit the Arduino HTTP transport and
+`NeuraiDepinClient` implementation. The portable codec remains available.
+The high-level client still uses its existing WIF-based initialization; the
+external identity API currently applies to the codec.
+
 ## Examples and validation
 
 - [Basic host tests](tests/README.md): codec, authentication, and client regression tests. After installing the documented dependencies, run `make -C tests run`. No board, node, or credentials are required.

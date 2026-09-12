@@ -1,7 +1,8 @@
-#if defined(ESP32) || defined(ARDUINO_ARCH_ESP32)
+#if (defined(ESP32) || defined(ARDUINO_ARCH_ESP32)) && !defined(NEURAI_DEPIN_NO_ARDUINO_CLIENT)
 
 #include "DepinTransport.h"
 #include <WiFiClientSecure.h>
+#include <WiFiClient.h>
 #include <HTTPClient.h>
 
 const char * depinTransportErrName(DepinTransportErr e) {
