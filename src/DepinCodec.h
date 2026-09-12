@@ -138,7 +138,9 @@ struct EciesView {
     size_t          entriesLen;
 };
 
-/* Parse + validate every field of a serialized envelope. */
+/* Parse + validate every field of a serialized envelope. Accepts Core's
+ * bytewise map order and the numeric uint160 order emitted by JS 3.1.0.
+ * Rejects mixed ordering and duplicates; never reorders the signed bytes. */
 Err eciesParse(const uint8_t * data, size_t len, EciesView & view, const Limits & lim = defaultLimits());
 /* Locate the 60-byte entry for `keyId` (hash160). NULL if absent. */
 const uint8_t * eciesFindEntry(const EciesView & view, const uint8_t keyId[20]);

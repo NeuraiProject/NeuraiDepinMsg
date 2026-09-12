@@ -11,8 +11,8 @@
  * 16-byte tags, no AAD, plus a cryptographic random source. Both are
  * platform-specific, so they are supplied through this small table:
  *
- *   - ESP32 / Arduino: DepinCryptoMbedtls.cpp registers mbedTLS + esp_fill_random
- *     automatically (static initializer). Wi-Fi/BT must be started, or a DRBG
+ *   - ESP32 / Arduino: DepinCryptoMbedtls.cpp supplies mbedTLS + esp_fill_random
+ *     automatically through an explicit linker reference. Wi-Fi/BT must be started, or a DRBG
  *     seeded, for esp_fill_random() to be cryptographically strong — see the
  *     Espressif random-number documentation.
  *   - Host tests: test/host/DepinCryptoOpenSSL.cpp registers OpenSSL EVP and a

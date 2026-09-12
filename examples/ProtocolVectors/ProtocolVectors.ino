@@ -4,7 +4,7 @@
  * and reports heap / stack / timing. This is the phase-1 acceptance sketch
  * of NeuraiDepinMsg 2.0.0: every line must print PASS.
  *
- * Board: any ESP32 (classic or S3). Serial 115200. No Wi-Fi needed — the
+ * Validation target: ESP32-S3. Serial 115200. No Wi-Fi needed — the
  * ECIES *encryption* self-test therefore uses esp_fill_random() unseeded by
  * RF, which is fine for a test but NOT for production traffic (see
  * DepinCryptoMbedtls.cpp). Decryption and verification need no randomness.
@@ -236,7 +236,7 @@ static void runVectors() {
     Meter m("ecies decrypt (1 message page)");
     depin::Err e = depin::eciesDecrypt(env.data(), env.size(), holder, pt, lim);
     m.done();
-    receive2 = String((const char *)pt.data(), pt.size());
+    if (!pt.empty()) receive2 = String((const char *)pt.data(), pt.size());
     report(e == depin::Err::Ok && receive2 == P(V_RECEIVE2_PLAIN), "§13.5 receive reply (1 message) decrypts"); }
 
   /* §13.6 message: normalise from RPC fields, verify, decrypt */
@@ -283,7 +283,7 @@ static void runVectors() {
 
   Serial.printf("heap at end: free %u, min ever %u, largest block %u; task stack high-water %u bytes\n",
                 (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMinFreeHeap(), (unsigned)ESP.getMaxAllocHeap(),
-                (unsigned)(uxTaskGetStackHighWaterMark(NULL) * sizeof(StackType_t)));
+                (unsigned)uxTaskGetStackHighWaterMark(NULL));
   Serial.printf("\n%d PASS, %d FAIL\n", g_pass, g_fail);
 }
 
@@ -297,7 +297,8 @@ void setup() {
   delay(1500);
   Serial.println("\nNeuraiDepinMsg ProtocolVectors (protocol 2, spec §13)");
   /* 16 KB stack: secp256k1 + AES-GCM comfortably; the loop task's 8 KB is tight */
-  xTaskCreatePinnedToCore(vectorsTask, "vectors", 16384, NULL, 1, NULL, 1);
+  if (xTaskCreatePinnedToCore(vectorsTask, "vectors", 16384, NULL, 1, NULL, 1) != pdPASS)
+    Serial.println("0 PASS, 1 FAIL: cannot allocate vectors task");
 }
 
 void loop() { delay(1000); }

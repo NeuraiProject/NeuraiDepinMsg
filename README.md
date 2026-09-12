@@ -1,127 +1,182 @@
-# NeuraiDepinMsg Library for ESP32
+# NeuraiDepinMsg for ESP32
 
-Build, encrypt, sign, and serialize DePIN messages compatible with Neurai Core.
+An Arduino C++ client and codec for **Neurai DePIN Messaging Protocol 2**.
+Send encrypted group and private messages, verify signed pool replies, and
+receive authenticated messages through Neurai Core RPC.
 
-This library allows ESP32 devices to produce the hex payload required for the Neurai RPC method `depinsubmitmsg`. It replicates the functionality of the `@neuraiproject/neurai-depin-msg` JavaScript library in a C++ environment optimized for microcontrollers.
+Use `NeuraiDepinClient` for network communication or `NeuraiDepinMsg` to build,
+parse, verify, and decrypt messages with your own transport.
 
 ## Features
 
-- **Hybrid ECIES Encryption**: AES-256-GCM message encryption with recipient key wrapping.
-- **Hardware Acceleration**: Leverages ESP32's `mbedtls` for high-performance AES-GCM encryption.
-- **Core Compatibility**: Produces serialization identical to Neurai Core (Bitcoin-style).
-- **Self-Contained Signing**: Handles secp256k1 signing using the `uNeurai` library.
-- **Automatic Recipient Handling**: Automatically includes the sender's public key as a recipient so the device can decrypt its own messages.
+- Group messaging with on-chain recipient discovery and private messaging to a specific address.
+- Hybrid ECIES encryption using secp256k1 and AES-256-GCM, with sender signature verification.
+- Explicit pool public-key and root-token pinning, plus HTTPS certificate verification.
+- Authenticated challenges, cursor-based pagination, and configurable response and message limits.
+- Typed errors for transport, RPC, trust, signature, and decoding failures.
+- Compatibility with Neurai Core and the JavaScript `@neuraiproject/neurai-depin-msg` library.
 
-## Dependencies
+## Dependencies and installation
 
-This library depends on:
-1.  **[uNeurai](https://github.com/NeuraiProject/uNeurai)**: For Neurai-specific cryptography (ECDSA, Hashing, Base58/WIF).
-2.  **mbedtls**: Bundled with the ESP32 Arduino Core (used for AES-GCM).
+The hardware configuration validated so far is **ESP32-S3**, using
+Arduino-ESP32 **2.0.17** through PlatformIO's `espressif32` **7.0.1** platform.
 
-## Installation
+| Dependency | Validated version | Purpose |
+| --- | --- | --- |
+| [uNeurai](https://github.com/NeuraiProject/uNeurai) | 0.0.11 | Keys, addresses, hashing, and secp256k1 signatures |
+| [ArduinoJson](https://github.com/bblanchon/ArduinoJson) | 6.21.6 | RPC request and response processing |
+| [mldsa-esp32](https://github.com/NeuraiProject/mldsa-esp32) | 0.2.0 | Required by the tested uNeurai configuration |
+| mbedTLS | Bundled with Arduino-ESP32 | AES-GCM and TLS |
 
-1.  Download or clone this repository.
-2.  Copy the `NeuraiDepinMsg` folder into your Arduino `libraries` directory.
-3.  Ensure you have the `uNeurai` library also installed in your Arduino IDE.
+Clone or download this repository into your Arduino sketchbook's `libraries`
+directory as `NeuraiDepinMsg`, and install the dependencies above. Use
+**ArduinoJson 6**, not version 7: the Arduino dependency manifest currently
+specifies a minimum version and does not enforce that upper bound.
 
-## High-Level Client (Recommended)
+The tested uNeurai configuration enables post-quantum support and therefore
+needs `mldsa-esp32`; DePIN message signatures themselves use secp256k1.
+With PlatformIO, ensure its dependency discovery makes `MLDSA44.h` available
+when compiling uNeurai.
 
-For most applications, it is recommended to use the `NeuraiDepinClient` class. It encapsulates all the RPC communication and encryption complexity.
+Arduino IDE/CLI installation and Arduino-ESP32 3.x have not yet been validated.
+Other ESP32 models are outside the current hardware validation scope.
+
+## Before connecting
+
+Obtain these settings from the operator of your DePIN pool:
+
+- The RPC service URL and its TLS root CA certificate in PEM format.
+- The pool's compressed public key: **66 hexadecimal characters**, obtained through a trusted channel.
+- The pool root token and the channel token, for example `&TEST` and `&TEST/SEC` in a local regtest fixture.
+- A compressed WIF for a P2PKH identity authorized for that channel. Its public key must be revealed on-chain by spending from the address.
+
+Connect Wi-Fi and synchronize the device's UTC clock before requesting
+challenges. Keep private keys and Wi-Fi credentials in local configuration or
+provisioned storage, outside source control. Start Wi-Fi before encrypting
+messages so the ESP32 random source has RF entropy available.
+
+A TLS certificate and a pool pin serve different purposes: configure both.
+A root-token or pool-key mismatch is an error to investigate, not a reason to
+automatically accept a replacement pin.
+
+## Client usage
+
+The following application fragments assume Wi-Fi is connected and the clock
+is synchronized. Replace every placeholder with settings for the same pool.
+The client defaults to testnet/regtest address encoding; use `setNetwork()`
+before `begin()` if your deployment requires another network.
 
 ```cpp
-#include <WiFi.h>
 #include <NeuraiDepinClient.h>
 
-NeuraiDepinClient depin;
-uint64_t lastTimestamp = 0;
-String lastHash = "";
+NeuraiDepinClient client;
+String cursor;  // Restore a previously committed cursor from storage if needed.
 
-void setup() {
-  // 1. Connect WiFi and sync NTP (User managed)
-  
-  // 2. Initialize the client
-  depin.begin("https://rpc-depin.neurai.org", "MYTOKEN", "MY_WIF_KEY");
+bool startMessaging(const char *rootCA, const char *holderWIF) {
+  client.setCACert(rootCA);  // Keep the PEM buffer alive while using the client.
+  client.setPoolPin("YOUR_66_HEX_POOL_PUBLIC_KEY", "&YOURPOOL");
+  client.setPageLimit(2);
 
-  // 3. Sending Messages
-  // Send to everyone holding the token
-  depin.sendGroupMessage("Hello everyone!");
-  
-  // Send to a specific address (fetches pubkey automatically)
-  depin.sendPrivateMessage("NUSS...CV", "Hello friend!");
+  if (!client.begin("https://YOUR_RPC_HOST", "&YOURPOOL/CHANNEL", holderWIF))
+    return false;
+  return client.bootstrap();
 }
 
-void loop() {
-  // 4. Poll and Detect Message Type (Batch Limit: 5)
-  auto msgs = depin.receiveMessages(lastTimestamp, 5, lastHash);
-  
-  for (auto &m : msgs) {
-    if (m.hash.length() > 0) lastHash = m.hash; // Update pagination cursor
-
-    if (m.decrypted) {
-      Serial.print("[" + m.type + "] "); // "private" or "group"
-      Serial.println(m.content);
-    }
+void publishMessages(const String &recipientAddress) {
+  String groupHash = client.sendGroupMessage("Hello everyone!");
+  if (groupHash.isEmpty()) {
+    Serial.println(client.lastErrorName());
+    return;
   }
-  delay(15000);
+
+  String privateHash = client.sendPrivateMessage(recipientAddress, "Hello privately!");
+  if (privateHash.isEmpty()) Serial.println(client.lastErrorName());
+}
+
+void pollMessages() {
+  if (!client.ready()) return;
+
+  // Bound work per poll. Continue from the saved cursor on the next poll.
+  for (unsigned pageNumber = 0; pageNumber < 4; ++pageNumber) {
+    DepinPageResult page = client.receivePage(cursor, 2);
+    if (!page.ok) {
+      Serial.println(client.lastErrorName());
+      return;  // Do not advance the cursor after a failed request.
+    }
+
+    for (const auto &message : page.messages) {
+      Serial.printf("[%s] %s\n", message.type.c_str(), message.content.c_str());
+    }
+    if (page.rejected) Serial.printf("Rejected rows: %u\n", (unsigned)page.rejected);
+
+    // Commit only after successfully processing the page's messages.
+    cursor = page.nextCursor;
+    // Persist cursor here if processing must resume after a reboot.
+    if (!page.shouldContinue) break;
+  }
 }
 ```
 
-## Batch Message Reception (Pagination)
+Call `publishMessages()` only after `startMessaging()` succeeds. For detailed
+diagnostics, use `lastError()`, `lastErrorName()`, and `lastErrorDetail()`.
+When `lastError()` is `depin::Err::RateLimited`, defer retries according to
+`retryAfterSec()` rather than polling immediately.
 
-For devices with limited memory (like ESP32), you can request messages in smaller batches using the `limit` and `lastHash` parameters.
+### Pagination and memory
 
-```cpp
-// Receive up to 5 messages starting after the 'lastHash'
-std::vector<IncomingMessage> msgs = depin.receiveMessages(lastTimestamp, 5, lastHash);
-```
+Use `page.nextCursor` rather than the last delivered message's hash: the
+transport cursor can also account for examined rows that were rejected.
+`page.messages` contains successfully verified and decrypted messages;
+`page.rejected` reports rows that were not delivered.
 
-- **limit**: Maximum number of messages to retrieve in one call.
-- **lastHash**: The hash of the last received message. The server will return messages *after* this hash.
+Follow `page.shouldContinue`, not just `page.serverHasMore`. Some node versions
+report `has_more=false` for a full page, so the client conservatively requests
+another page. An empty final page is expected when the total is an exact
+multiple of the page size.
 
-Always ensure you update `lastHash` with `msg.hash` from the received messages to properly advance the cursor.
+A page limit bounds the number of rows, not their byte size. Configure
+`client.limits()` and `setMaxResponseBytes()` before `begin()`, and measure
+memory with your intended payload sizes and recipient counts. Two messages
+per page is a tested starting point, not a guarantee for every workload.
 
-## Low-Level Usage
+## Codec API
 
-If you prefer to handle the RPC communication yourself, you can use the static methods in `NeuraiDepinMsg`.
+`NeuraiDepinMsg` provides these operations without managing an RPC connection:
 
-```cpp
-#include <NeuraiDepinMsg.h>
+| Method | Purpose |
+| --- | --- |
+| `buildDepinMessage(params)` | Encrypt content for recipients and sign the serialized message |
+| `wrapMessageForServer(messageHex, poolKey)` | Encrypt the signed message's ASCII hex for submission to the pool |
+| `parseDepinMessage(messageHex, out)` | Parse the serialized message |
+| `fromRpcFields(...)` | Normalize an RPC row and check its announced hash |
+| `verifyDepinMessage(message, senderKey)` | Verify the sender signature and address/key correspondence |
+| `decryptPayload(payloadHex, privateKey)` | Decrypt the recipient's ECIES payload |
 
-void setup() {
-  DepinParams params;
-  params.token = "MYTOKEN";
-  params.senderAddress = "N...";
-  params.senderPubKey = "02..."; // 33-byte compressed hex
-  params.privateKey = "WIF_OR_HEX"; 
-  params.timestamp = 1704542400;
-  params.message = "Hello from ESP32!";
-  params.recipientPubKeys = {"03..."}; // Add recipient compressed pubkeys
-  params.messageType = "private"; // or "group"
+`DepinParams` accepts a token, sender address and public key, WIF or hex private
+key, timestamp in **Unix seconds**, content, recipient public keys, and a
+`group` or `private` message type. It includes the sender as a recipient by
+default. Check `DepinMessageResult::ok()` and `NeuraiDepinMsg::lastErrorName()`.
 
-  DepinMessageResult res = NeuraiDepinMsg::buildDepinMessage(params);
+`result.hex` is the signed serialized message; it is **not the complete
+Protocol 2 submission request**. A custom transport must also implement the
+pool envelope and authenticated RPC flow. Parsing or decrypting alone does
+not establish sender authenticity: verify the signature as well.
 
-  Serial.print("Hex for depinsubmitmsg: ");
-  Serial.println(res.hex);
-}
-```
+## Examples and validation
 
-## Technical Details
+- [EasyMessaging](examples/EasyMessaging/EasyMessaging.ino): Wi-Fi client setup, publishing, and polling. Replace its Wi-Fi, WIF, token, pool-key, and CA placeholders with a consistent configuration. Its example token and key are not a verified pin for the public URL shown. Configure a CA for verified TLS; the sketch's insecure fallback is for lab use only.
+- [ProtocolVectors](examples/ProtocolVectors/ProtocolVectors.ino): offline protocol vectors with heap, stack, and timing output. Embedded keys are public regtest fixtures and must never hold funds.
 
-### Encryption (Hybrid ECIES)
-The library follows Neurai Core's cryptographic standards:
-- **Ephemeral Keys**: A new secp256k1 key pair is generated for every message.
-- **KDF**: Uses `KDF_SHA256` for key derivation.
-- **AES-256-GCM**: Encrypts the payload and the per-recipient keys with 12-byte nonces and 16-byte authentication tags.
+On an ESP32-S3 with PSRAM disabled, the protocol vectors passed **32 checks**.
+A separate Wi-Fi/HTTPS regtest run completed pinned bootstrap, group/private
+publication, and verification and decryption of six messages across pages of
+**2 + 2 + 2 + 0**. JavaScript **3.1.0** independently verified and decrypted
+the same messages against a real Neurai node running in Docker.
 
-### Data Structure
-The final hex payload is a serialized `CDepinMessage`:
-1. `token` (String)
-2. `senderAddress` (String)
-3. `timestamp` (Int64)
-4. `messageType` (Uint8)
-5. `encryptedPayload` (Vector)
-6. `signature` (Vector)
+These results cover the tested workloads. Public testnet operation, maximum
+payload/recipient sizing, and sustained hardware stress testing remain pending.
+Development test tools are maintained locally and are not included in this repository.
 
 ## License
 
-MIT
+[MIT](LICENSE)

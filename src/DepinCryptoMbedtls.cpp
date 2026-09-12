@@ -48,13 +48,13 @@ bool randomBytes(uint8_t * out, size_t len) {
     return true;
 }
 
-struct Register {
-    Register() {
-        depin::CryptoBackend b = { gcmEncrypt, gcmDecrypt, randomBytes };
-        depin::setCryptoBackend(b);
-    }
-} registerBackend;
-
 } // namespace
+
+namespace depin {
+const CryptoBackend * mbedtlsCryptoBackend() {
+    static const CryptoBackend backend = { gcmEncrypt, gcmDecrypt, randomBytes };
+    return &backend;
+}
+} // namespace depin
 
 #endif /* ESP32 */

@@ -78,7 +78,16 @@ static CryptoBackend g_backend = { NULL, NULL, NULL };
 
 void setCryptoBackend(const CryptoBackend & backend) { g_backend = backend; }
 
+#if defined(ESP32) || defined(ARDUINO_ARCH_ESP32)
+const CryptoBackend * mbedtlsCryptoBackend();
+#endif
+
 const CryptoBackend * cryptoBackend() {
+#if defined(ESP32) || defined(ARDUINO_ARCH_ESP32)
+    // An explicit reference retains the backend when linked from an archive.
+    if (!g_backend.aesGcmEncrypt && !g_backend.aesGcmDecrypt && !g_backend.randomBytes)
+        return mbedtlsCryptoBackend();
+#endif
     if (!g_backend.aesGcmEncrypt || !g_backend.aesGcmDecrypt || !g_backend.randomBytes) return NULL;
     return &g_backend;
 }
@@ -335,6 +344,7 @@ Err eciesParse(const uint8_t * data, size_t len, EciesView & view, const Limits 
 
     const uint8_t * entries = data + off;
     const uint8_t * prevKey = NULL;
+    bool bytewiseOrder = true, legacyNumericOrder = true;
     for (uint64_t i = 0; i < count; i++) {
         if (len - off < 20) return Err::Truncated;
         const uint8_t * key = data + off;
@@ -342,13 +352,26 @@ Err eciesParse(const uint8_t * data, size_t len, EciesView & view, const Limits 
         const uint8_t * pkg; size_t pkgLen;
         if ((e = readSpan(data, len, off, &pkg, &pkgLen, 255)) != Err::Ok) return e;
         if (pkgLen != DEPIN_ECIES_ENTRY_LEN) return Err::BadRecipientEntry;
+        // All preceding entries have a minimal one-byte length (60), hence
+        // fixed width. Check duplicates even when they are not adjacent.
+        for (uint64_t j = 0; j < i; j++) {
+            if (memcmp(entries + j * (20 + 1 + DEPIN_ECIES_ENTRY_LEN), key, 20) == 0)
+                return Err::DuplicateRecipient;
+        }
         if (prevKey) {
             int c = memcmp(prevKey, key, 20);
-            if (c == 0) return Err::DuplicateRecipient;
-            if (c > 0)  return Err::RecipientOrder;      /* node: std::map<uint160> bytewise */
+            if (c > 0) bytewiseOrder = false; // current Core base_blob::Compare
+            int numeric = 0;
+            for (int b = 19; b >= 0; b--) {
+                if (prevKey[b] != key[b]) { numeric = (int)prevKey[b] - key[b]; break; }
+            }
+            if (numeric > 0) legacyNumericOrder = false; // JS 3.1.0 base_uint ordering
         }
         prevKey = key;
     }
+    // Compatibility is decode-only: preserve the original signed payload,
+    // accept either complete ordering, and reject mixed permutations.
+    if (!bytewiseOrder && !legacyNumericOrder) return Err::RecipientOrder;
     if (off != len) return Err::TrailingBytes;
 
     view.ephemeral = eph;
