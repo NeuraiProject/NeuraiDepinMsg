@@ -18,7 +18,8 @@ Then run these commands from the repository root:
 
 ```sh
 mkdir -p tests/deps
-git clone --depth 1 --branch v0.0.11 https://github.com/NeuraiProject/uNeurai.git tests/deps/uNeurai
+git clone https://github.com/NeuraiProject/uNeurai.git tests/deps/uNeurai
+git -C tests/deps/uNeurai checkout e371779e9adbcba7e080614ca46370cf864c146c
 git clone --depth 1 --branch v6.21.6 https://github.com/bblanchon/ArduinoJson.git tests/deps/ArduinoJson
 make -C tests -j4 run
 ```
@@ -33,19 +34,28 @@ Alternatively, supply existing dependency checkouts:
 make -C tests -j4 run UNEURAI=/path/to/uNeurai ARDUINOJSON=/path/to/ArduinoJson
 ```
 
-Use uNeurai 0.0.11 and ArduinoJson 6.21.6 for the validated configuration.
+Use uNeurai 0.3.1 and ArduinoJson 6.21.6 for the validated configuration.
 Run `make -C tests clean` before switching dependency paths or compiler options.
 
-## Results and scope
+## Fixtures and real-node integration
 
-Each executable prints its check and failure counts and returns a nonzero
-status on failure. `make run` stops if any executable fails. The current suite
-contains 169 codec checks, 93 authentication checks, and 111 client checks.
+`fixtures/depin_rpc_v6.json` and `fixtures/depin_format3.json` are copied
+from Core's `src/test/data` on `DePIN-Test` at `ad83bd8`. The RPC tests
+cover the eight vectors for the six methods supported by the RPC codec. The codec
+tests check message and transport contexts, hash, signature, key commitment,
+recipient ordering and authenticated decryption. `vectors.txt`
+supplies public key fixtures for WIF and address tests.
 
-`fixtures/vectors.txt` contains public regtest vectors, with their upstream
-source revision recorded in its header. These keys are test data and must
-never hold funds. No Wi-Fi credentials or live wallet keys are needed.
+For a real-node run, build Core with wallet support and install its Python
+functional-test dependencies. From this directory run the following commands,
+with `NEURAI_SOURCE` pointing at the branch checkout. The driver creates and
+stops two temporary regtest nodes and passes their fixture keys through pipes.
 
-These tests do not validate Arduino adapters, hardware memory usage, TLS on
-the ESP32, or interoperability against a real node. Those integration tools
-remain in the separate local `test/` directory, which is not published.
+```sh
+make build/regtest
+DEPIN_CLIENT_TEST="$PWD/build/regtest" python3 integration/regtest.py --srcdir="$NEURAI_SOURCE/src"
+```
+
+The integration exercises group and private publication and paged reads
+from a Legacy and a strict ECDSA wallet. The physical ESP32 transport uses
+mbedTLS and Arduino HTTPClient, which are outside the host suite.

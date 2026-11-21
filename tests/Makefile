@@ -3,7 +3,7 @@
 #   make run                      # build + run against fixtures/vectors.txt
 #   make UNEURAI=/path/to/uNeurai # override the uNeurai checkout
 #
-# Needs: g++, OpenSSL dev headers (libssl-dev), a uNeurai checkout >= 0.0.11.
+# Needs: g++, OpenSSL dev headers (libssl-dev), a uNeurai checkout >= 0.3.1.
 # The Arduino adapter (NeuraiDepinMsg.cpp, NeuraiDepinClient.cpp) is NOT built
 # here: it depends on Arduino/mbedTLS and is compiled for the ESP32 target.
 
@@ -19,7 +19,7 @@ CFLAGS   = -I$(UNEURAI)/src -g -O1
 
 UNEURAI_CPP = $(wildcard $(UNEURAI)/src/*.cpp)
 UNEURAI_C   = $(wildcard $(UNEURAI)/src/utility/trezor/*.c) $(wildcard $(UNEURAI)/src/utility/*.c)
-LIB_CPP     = $(LIB)/DepinCodec.cpp $(LIB)/DepinAuth.cpp $(LIB)/DepinReply.cpp $(LIB)/DepinClient.cpp
+LIB_CPP     = $(LIB)/DepinCodec.cpp $(LIB)/DepinRpc.cpp $(LIB)/DepinAuth.cpp $(LIB)/DepinReply.cpp $(LIB)/DepinClient.cpp
 HOST_CPP    = DepinCryptoOpenSSL.cpp
 TESTS       = test_codec test_auth test_client
 
@@ -31,7 +31,7 @@ OBJS = $(patsubst $(UNEURAI)/src/%.cpp,$(BUILD)/un/%.cpp.o,$(UNEURAI_CPP)) \
 all: check-deps $(addprefix $(BUILD)/,$(TESTS))
 
 run: all
-	@for t in $(TESTS); do echo "== $$t"; ./$(BUILD)/$$t fixtures/vectors.txt || exit 1; done
+	@for t in $(TESTS); do echo "== $$t"; $(BUILD)/$$t fixtures/vectors.txt || exit 1; done
 
 $(BUILD)/un/%.cpp.o: $(UNEURAI)/src/%.cpp
 	@mkdir -p $(dir $@)
@@ -41,7 +41,7 @@ $(BUILD)/un/%.c.o: $(UNEURAI)/src/%.c
 	@mkdir -p $(dir $@)
 	$(CC) -c $(CFLAGS) -w $< -o $@
 
-$(BUILD)/%.cpp.o: $(LIB)/%.cpp $(LIB)/DepinCodec.h $(LIB)/DepinCrypto.h $(LIB)/DepinAuth.h $(LIB)/DepinReply.h $(LIB)/DepinClient.h
+$(BUILD)/%.cpp.o: $(LIB)/%.cpp $(LIB)/DepinCodec.h $(LIB)/DepinCrypto.h $(LIB)/DepinAuth.h $(LIB)/DepinRpc.h $(LIB)/DepinReply.h $(LIB)/DepinClient.h
 	@mkdir -p $(dir $@)
 	$(CXX) -c $(CPPFLAGS) $< -o $@
 
@@ -49,7 +49,7 @@ $(BUILD)/DepinCryptoOpenSSL.cpp.o: $(HOST_CPP) $(LIB)/DepinCrypto.h
 	@mkdir -p $(dir $@)
 	$(CXX) -c $(CPPFLAGS) $< -o $@
 
-$(BUILD)/test_%: test_%.cpp $(OBJS) $(LIB)/DepinCodec.h $(LIB)/DepinAuth.h $(LIB)/DepinReply.h $(LIB)/DepinClient.h
+$(BUILD)/test_%: test_%.cpp $(OBJS) $(LIB)/DepinCodec.h $(LIB)/DepinAuth.h $(LIB)/DepinRpc.h $(LIB)/DepinReply.h $(LIB)/DepinClient.h
 	$(CXX) $(CPPFLAGS) $< $(OBJS) -lcrypto -o $@
 
 clean:
@@ -61,3 +61,6 @@ check-deps:
 	@test -f "$(ARDUINOJSON)/src/ArduinoJson.h" || { echo "Missing ArduinoJson 6: see tests/README.md or set ARDUINOJSON"; exit 1; }
 
 $(OBJS): | check-deps
+
+$(BUILD)/regtest: integration/regtest.cpp $(OBJS)
+	$(CXX) $(CPPFLAGS) $< $(OBJS) -lcrypto -o $@

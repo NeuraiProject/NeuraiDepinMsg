@@ -19,7 +19,6 @@ IncomingMessage	KEYWORD1
 begin	KEYWORD2
 sendGroupMessage	KEYWORD2
 sendPrivateMessage	KEYWORD2
-receiveMessages	KEYWORD2
 buildDepinMessage	KEYWORD2
 wrapMessageForServer	KEYWORD2
 unwrapMessageFromServer	KEYWORD2
@@ -59,6 +58,8 @@ IncomingMessage	KEYWORD1
 setPoolPin	KEYWORD2
 setTrustMode	KEYWORD2
 setNetwork	KEYWORD2
+setExpectedGenesis	KEYWORD2
+setStrictEcdsa	KEYWORD2
 setPageLimit	KEYWORD2
 bootstrap	KEYWORD2
 ready	KEYWORD2
@@ -66,7 +67,5 @@ acceptPin	KEYWORD2
 sendGroupMessage	KEYWORD2
 sendPrivateMessage	KEYWORD2
 receivePage	KEYWORD2
-receiveMessages	KEYWORD2
-lastReceiveCursor	KEYWORD2
 lastErrorDetail	KEYWORD2
 retryAfterSec	KEYWORD2

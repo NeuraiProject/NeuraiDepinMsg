@@ -2,17 +2,11 @@
 #include <ArduinoJson.h>
 #include <string.h>
 #include <stdio.h>
+#include <algorithm>
 
 namespace depin {
 
 /* ── helpers ─────────────────────────────────────────────────────────────── */
-
-bool tokenInScope(const std::string & messageToken, const std::string & scope) {
-    if (scope.empty() || messageToken.empty()) return false;
-    if (messageToken == scope) return true;
-    return messageToken.size() > scope.size() + 1 &&
-           messageToken.compare(0, scope.size(), scope) == 0 && messageToken[scope.size()] == '/';
-}
 
 std::string jsonEscape(const std::string & s) {
     std::string o;
@@ -61,17 +55,24 @@ Err DepinClient::begin(const ClientConfig & cfg, const std::string & wif) {
     _challengeValid = false;
     _pubCache.clear(); _pubOrder.clear();
     _cfg = cfg;
+    if (!_cfg.net) _cfg.net = &NeuraiTest;
+    if (_cfg.expectedGenesis.empty()) _cfg.expectedGenesis = networkGenesis(_cfg.net);
+    if (_cfg.limits.maxRecipients == 0 || _cfg.limits.maxContent == 0) return fail(Err::BadArg, "limits");
+    if (!validChallenge(_cfg.expectedGenesis)) return fail(Err::BadField, "expectedGenesis");
     if (_cfg.serviceId.empty() || !validToken(_cfg.token, _cfg.limits)) return fail(Err::BadArg, "serviceId/token");
     if (_cfg.pageLimit == 0 || _cfg.pageLimit > 1000) return fail(Err::BadArg, "pageLimit");
     bool compressed = false;
     Err e = loadPrivateKey(wif, _key, &compressed);
     if (e != Err::Ok) return fail(e, "wif");
-    if (!compressed) return fail(Err::BadPrivKey, "uncompressed WIF");
+    if (!compressed && _cfg.strictEcdsa) return fail(Err::BadPrivKey, "uncompressed WIF");
     PublicKey pub = _key.publicKey();
-    pub.compressed = true;
-    if (!pub.isValid() || pub.sec(_pubKey, 33) != 33) return fail(Err::BadPrivKey, "pubkey");
-    _pubKeyHex = hexEncode(_pubKey, 33);
-    _address = addressForKey(pub, _cfg.net);
+    pub.compressed = compressed;
+    _pubKeySize = pub.sec(_pubKey, sizeof(_pubKey));
+    if (!pub.isValid() || _pubKeySize != (compressed ? 33u : 65u)) return fail(Err::BadPrivKey, "pubkey");
+    _pubKeyHex = hexEncode(_pubKey, _pubKeySize);
+    char strict[64] = {};
+    if (_cfg.strictEcdsa) pub.ecdsaAddress(strict, sizeof(strict), _cfg.net);
+    _address = _cfg.strictEcdsa ? std::string(strict) : addressForKey(pub, _cfg.net);
     if (_address.empty() || !pubKeyMatchesAddress(pub, _address, _cfg.net)) return fail(Err::BadPrivKey, "address");
     if (_cfg.trust == TrustMode::RequirePin) {
         if (_cfg.pin.serviceId.empty()) _cfg.pin.serviceId = _cfg.serviceId;
@@ -118,27 +119,67 @@ Err DepinClient::requireReady() {
 
 /* ── bootstrap ───────────────────────────────────────────────────────────── */
 
+Err DepinClient::call(RpcRequest & r, std::string & json) {
+    const CryptoBackend * backend = cryptoBackend();
+    if (!backend) return fail(Err::NoCryptoBackend);
+    uint8_t random[32];
+    if (!backend->randomBytes(random, sizeof(random))) return fail(Err::Rng);
+    r.id = hexEncode(random, sizeof(random));
+    uint64_t now = _clock.unixMs();
+    if (now < 1000000000000ULL || now > INT64_MAX) return fail(Err::ClockInvalid);
+    r.timestampMs = int64_t(now);
+    r.service = _service;
+    std::string params, hash, id, body;
+    Err e = encodeRequest(r, &_key, params, hash);
+    if (e != Err::Ok) return fail(e, r.method);
+    e = rpcCall(r.method, params, id, body);
+    if (e != Err::Ok) return e;
+    ReplyEnvelope reply;
+    RpcError rpcError;
+    e = parseReplyEnvelope(body, id, reply, &rpcError, _cfg.limits);
+    if (e == Err::RpcError) { fail(e, r.method); _last.rpc = rpcError; return e; }
+    if (e != Err::Ok) return fail(e, r.method);
+    e = verifyAndOpen(reply, r, hash, _cfg.expectedGenesis, _cfg.pin, _cfg.trust, _key, json, _cfg.limits);
+    if (e != Err::Ok) return fail(e, r.method);
+    // Inspect only the error field here. The caller parses the full successful body.
+    StaticJsonDocument<128> filter;
+    filter["error"] = true;
+    DynamicJsonDocument errorDoc(1024);
+    if (deserializeJson(errorDoc, json, DeserializationOption::Filter(filter)) || !errorDoc.is<JsonObject>())
+        return fail(Err::BadJson, r.method);
+    if (reply.service.revision != _service.revision) invalidateChallenge();
+    _service = reply.service;
+    if (!errorDoc["error"].isNull()) {
+        fail(Err::RpcError, r.method);
+        _last.rpc.code = errorDoc["error"]["code"] | 0;
+        _last.rpc.reason = errorDoc["error"]["data"]["depin_error"] | "";
+        _last.rpc.message = errorDoc["error"]["message"] | "";
+        return Err::RpcError;
+    }
+    return Err::Ok;
+}
+
 Err DepinClient::bootstrap() {
     if (!_began) return fail(Err::NotBootstrapped, "begin");
-    _ready = false;
-    _challengeValid = false;
-    std::string id, body;
-    Err e = rpcCall("depingetmsginfo", "[]", id, body);
+    _ready = _pinConfirmed = false;
+    invalidateChallenge();
+    RpcRequest request;
+    request.method = "depingetmsginfo";
+    std::string json;
+    Err e = call(request, json);
     if (e != Err::Ok) return e;
-    BootstrapResult b;
-    RpcError re;
-    e = depin::bootstrap(body, id, _cfg.trust, _cfg.pin, _cfg.serviceId, _cfg.net, b, &re, _cfg.limits);
-    if (e == Err::RpcError) { fail(e, "depingetmsginfo"); _last.rpc = re; return e; }
-    if (e != Err::Ok) return fail(e, "depingetmsginfo");
-    if (!tokenInScope(_cfg.token, b.info.token)) return fail(Err::ScopeMismatch, "token outside the pool root");
-    /* the server can never raise our local ceilings */
-    if (b.info.maxRecipients > _cfg.limits.maxRecipients) b.info.maxRecipients = (uint32_t)_cfg.limits.maxRecipients;
-    if (b.info.maxMessageSize > _cfg.limits.maxContent) b.info.maxMessageSize = (uint32_t)_cfg.limits.maxContent;
-    _info = b.info;
-    if (loadPublicKey(b.candidate.poolPubKeyHex, _poolKey) != Err::Ok) return fail(Err::BadPubKey, "pool key");
-    _candidate = b.candidate;
-    _pinConfirmed = b.pinConfirmed;
-    if (_pinConfirmed) _pin = b.candidate;
+    DynamicJsonDocument doc(json.size()*2 + 2048);
+    if (deserializeJson(doc, json)) return fail(Err::BadJson, request.method);
+    if ((e = parsePoolInfo(doc.as<JsonObjectConst>(), _service, _cfg.net, _info)) != Err::Ok) return fail(e, request.method);
+    if (!tokenInScope(_cfg.token, _info.token)) return fail(Err::ScopeMismatch);
+    _info.maxRecipients = std::min<size_t>(_info.maxRecipients, _cfg.limits.maxRecipients);
+    _info.maxMessageSize = std::min<size_t>(_info.maxMessageSize, _cfg.limits.maxContent);
+    if (loadPublicKey(_service.poolKey, _poolKey) != Err::Ok) return fail(Err::BadPubKey);
+    _candidate.serviceId = _cfg.serviceId;
+    _candidate.rootToken = _service.root;
+    _candidate.poolPubKeyHex = _service.poolKey;
+    _pinConfirmed = _cfg.trust != TrustMode::ExplicitTofu;
+    if (_pinConfirmed) _pin = _candidate;
     _ready = true;
     return fail(_pinConfirmed ? Err::Ok : Err::PinNotAccepted);
 }
@@ -147,7 +188,8 @@ Err DepinClient::acceptPin() {
     if (!_ready) return fail(Err::NotBootstrapped, "bootstrap");
     if (_pinConfirmed) return fail(Err::Ok);
     if (!_candidate.complete()) return fail(Err::PinRequired, "no candidate");
-    _pin = _candidate;
+    _pin = _cfg.pin = _candidate;
+    _cfg.trust = TrustMode::RequirePin;
     _pinConfirmed = true;
     return fail(Err::Ok);
 }
@@ -178,8 +220,9 @@ Err DepinClient::getPubKey(const std::string & address, std::string & pubKeyHex)
     Err e = rpcCall("getpubkey", "[" + q(address) + "]", id, body);
     if (e != Err::Ok) return e;
     /* getpubkey is a plain chain query: {result:{address,pubkey,revealed,...}} or a bare string */
+    if (body.size() > 4096) return fail(Err::TooLarge, "getpubkey");
     DynamicJsonDocument doc(body.size() + 512);
-    if (body.size() > 4096 || deserializeJson(doc, body) || doc.overflowed() || !doc.is<JsonObject>()) return fail(Err::BadJson, "getpubkey");
+    if (deserializeJson(doc, body) || doc.overflowed() || !doc.is<JsonObject>()) return fail(Err::BadJson, "getpubkey");
     if (!doc["error"].isNull()) {
         fail(Err::RpcError, "getpubkey");
         _last.rpc.code = doc["error"]["code"] | 0;
@@ -210,21 +253,16 @@ Err DepinClient::getPubKey(const std::string & address, std::string & pubKeyHex)
 
 /* ── publishing ──────────────────────────────────────────────────────────── */
 
-Err DepinClient::resolveGroupRecipients(std::vector<std::vector<uint8_t> > & keys, SendResult & stats) {
+Err DepinClient::resolveGroupRecipients(RecipientKeys & keys, SendResult & stats) {
     keys.clear();
     Err e = requireReady();
     if (e != Err::Ok) return e;
-    char n[16]; snprintf(n, sizeof(n), "%u", (unsigned)_info.maxRecipients);
-    std::string id, body;
-    e = rpcCall("depingetancestorrecipients", "[" + q(_cfg.token) + "," + n + "," + q(_pin.rootToken) + "]", id, body);
-    if (e != Err::Ok) return e;
-    ReplyContext ctx; ctx.method = "depingetancestorrecipients"; ctx.token = _cfg.token;
-    std::string json; RpcError re;
-    Limits lim = _cfg.limits; lim.maxReplyJson = 16384;
-    e = openReply(body, id, ctx, ReplyKind::Plain, _poolKey, NULL, json, &re, lim);
-    if (e == Err::RpcError) { fail(e, "depingetancestorrecipients"); _last.rpc = re; return e; }
-    if (e != Err::Ok) return fail(e, "depingetancestorrecipients");
-
+    RpcRequest request;
+    request.method = "depingetancestorrecipients";
+    request.token = _cfg.token;
+    request.limit = _info.maxRecipients;
+    std::string json;
+    if ((e = call(request, json)) != Err::Ok) return e;
     DynamicJsonDocument doc(json.size() * 2 + 1024);
     if (deserializeJson(doc, json) || doc.overflowed() || !doc.is<JsonObject>()) return fail(Err::BadJson, "recipients");
     JsonObject o = doc.as<JsonObject>();
@@ -249,24 +287,25 @@ Err DepinClient::resolveGroupRecipients(std::vector<std::vector<uint8_t> > & key
         PublicKey pub;
         if (loadPublicKey(std::string(k), pub) != Err::Ok) return fail(Err::BadPubKey, a);
         if (!pubKeyMatchesAddress(pub, a, _cfg.net)) return fail(Err::BadPubKey, std::string("recipient key != address ") + a);
-        std::vector<uint8_t> sec(33);
-        hexDecode(k, 66, sec.data(), 33, NULL);
-        bool dup = false;
-        for (size_t i = 0; i < keys.size(); i++) if (keys[i] == sec) { dup = true; break; }
-        if (!dup) keys.push_back(sec);
-        if (memcmp(sec.data(), _pubKey, 33) == 0) senderIn = true;
-        if (keys.size() > _cfg.limits.maxRecipients) return fail(Err::TooManyRecipients);
+        std::vector<uint8_t> sec(strlen(k)/2);
+        hexDecode(k, strlen(k), sec.data(), sec.size(), NULL);
+        bool duplicate = false;
+        for (const auto & key : keys) if (key.address == a) duplicate = true;
+        if (!duplicate) keys.push_back({sec, a});
+        if (_address == a) senderIn = true;
+        if (keys.size() > _info.maxRecipients) return fail(Err::TooManyRecipients);
     }
-    if (!senderIn) keys.push_back(std::vector<uint8_t>(_pubKey, _pubKey + 33));
+    if (!senderIn) keys.push_back({std::vector<uint8_t>(_pubKey, _pubKey+_pubKeySize), _address});
     if (keys.size() > _info.maxRecipients) return fail(Err::TooManyRecipients, "final set incl. sender");
     stats.recipients = keys.size();
     return Err::Ok;
 }
 
 Err DepinClient::send(const std::string & content, uint8_t type,
-                      const std::vector<std::vector<uint8_t> > & recipients, SendResult & out) {
+                      const RecipientKeys & recipients, SendResult & out) {
     Err e = requireReady();
     if (e != Err::Ok) return e;
+    if (recipients.size() > _info.maxRecipients) return fail(Err::TooManyRecipients);
     if (content.empty()) return fail(Err::BadField, "empty content");
     size_t maxContent = _info.maxMessageSize ? _info.maxMessageSize : _cfg.limits.maxContent;
     if (content.size() > maxContent) return fail(Err::TooLarge, "content");
@@ -274,28 +313,24 @@ Err DepinClient::send(const std::string & content, uint8_t type,
     if (now < 1000000000000ULL) return fail(Err::ClockInvalid);
 
     DepinMessage m;
-    e = messageBuild(_cfg.token, _address, (int64_t)(now / 1000), type,
+    e = messageBuild(_cfg.expectedGenesis, _cfg.token, _address, (int64_t)(now / 1000), type,
                      (const uint8_t *)content.data(), content.size(), recipients, _key, m, _cfg.limits);
     if (e != Err::Ok) return fail(e, "build");
-    if (m.payload.size() > (size_t)_info.maxMessageSize * _info.maxRecipients) return fail(Err::TooLarge, "payload > size*recipients");
     std::vector<uint8_t> wire;
     if ((e = messageSerialize(m, wire, _cfg.limits)) != Err::Ok) return fail(e, "serialize");
     std::string hex = hexEncode(wire.data(), wire.size());
     uint8_t poolSec[33];
     if (_poolKey.sec(poolSec, 33) != 33) return fail(Err::BadPubKey, "pool key");
     std::vector<uint8_t> env;
-    if ((e = wrapForPool(hex, poolSec, env, _cfg.limits)) != Err::Ok) return fail(e, "wrap");
+    if ((e = wrapForPool(_cfg.expectedGenesis, hex, poolSec, env, _cfg.limits)) != Err::Ok) return fail(e, "wrap");
 
-    std::string id, body;
-    std::string params = "[{\"sender\":" + q(_address) + ",\"encrypted\":\"" + hexEncode(env.data(), env.size()) + "\"}]";
-    e = rpcCall("depinsubmitmsg", params, id, body);
-    if (e != Err::Ok) return e;                 /* timeout: outcome unknown, hash kept below */
+    RpcRequest request;
+    request.method = "depinsubmitmsg";
+    request.address = _address;
+    request.encrypted = hexEncode(env.data(), env.size());
+    std::string json;
+    if ((e = call(request, json)) != Err::Ok) return e;
     out.hash = m.hash();
-    ReplyContext ctx; ctx.method = "depinsubmitmsg"; ctx.token = _cfg.token; ctx.address = _address;
-    std::string json; RpcError re;
-    e = openReply(body, id, ctx, ReplyKind::Bound, _poolKey, &_key, json, &re, _cfg.limits);
-    if (e == Err::RpcError) { fail(e, "depinsubmitmsg"); _last.rpc = re; return e; }
-    if (e != Err::Ok) return fail(e, "depinsubmitmsg reply");
     DynamicJsonDocument doc(json.size() + 512);
     if (deserializeJson(doc, json) || doc.overflowed() || !doc.is<JsonObject>()) return fail(Err::BadJson, "submit reply");
     const char * res = doc["result"] | "";
@@ -307,7 +342,7 @@ Err DepinClient::send(const std::string & content, uint8_t type,
 
 Err DepinClient::sendGroup(const std::string & content, SendResult & out) {
     out = SendResult();
-    std::vector<std::vector<uint8_t> > keys;
+    RecipientKeys keys;
     Err e = resolveGroupRecipients(keys, out);
     if (e != Err::Ok) return e;
     return send(content, DEPIN_TYPE_GROUP, keys, out);
@@ -319,11 +354,11 @@ Err DepinClient::sendPrivate(const std::string & targetAddress, const std::strin
     if (e != Err::Ok) return e;
     std::string hex;
     if ((e = getPubKey(targetAddress, hex)) != Err::Ok) return e;
-    std::vector<std::vector<uint8_t> > keys;
-    std::vector<uint8_t> t(33);
-    hexDecode(hex.c_str(), 66, t.data(), 33, NULL);
-    keys.push_back(t);
-    if (memcmp(t.data(), _pubKey, 33) != 0) keys.push_back(std::vector<uint8_t>(_pubKey, _pubKey + 33));
+    RecipientKeys keys;
+    std::vector<uint8_t> t(hex.size()/2);
+    hexDecode(hex.c_str(), hex.size(), t.data(), t.size(), NULL);
+    keys.push_back({t, targetAddress});
+    if (targetAddress != _address) keys.push_back({std::vector<uint8_t>(_pubKey, _pubKey + _pubKeySize), _address});
     return send(content, DEPIN_TYPE_PRIVATE, keys, out);
 }
 
@@ -339,29 +374,17 @@ bool DepinClient::hasChallenge() const {
 Err DepinClient::ensureChallenge() {
     if (hasChallenge()) return Err::Ok;
     invalidateChallenge();
-    uint64_t t = _clock.unixMs();
-    if (t < 1000000000000ULL) return fail(Err::ClockInvalid, "wall clock");
-    if (t <= _lastSignedMs) return fail(Err::ClockInvalid, "clock did not advance");   /* never reuse a signed ms */
-    std::string pre, sig;
-    Err e = requestPreimage("receive", _cfg.token, _address, t, pre);
-    if (e != Err::Ok) return fail(e, "DEPIN-REQ");
-    if ((e = signPreimage(_key, pre, sig)) != Err::Ok) return fail(e, "sign DEPIN-REQ");
-    _lastSignedMs = t;
-    char ms[24]; snprintf(ms, sizeof(ms), "%llu", (unsigned long long)t);
-    std::string id, body;
-    e = rpcCall("depinchallenge", "[" + q(_cfg.token) + "," + q(_address) + "," + ms + "," + q(sig) + ",\"receive\"]", id, body);
-    if (e != Err::Ok) return e;
+    RpcRequest request;
+    request.method = "depinchallenge"; request.token = _cfg.token; request.address = _address;
     uint32_t t0 = _clock.monotonicMs();
-    ReplyContext ctx; ctx.method = "depinchallenge"; ctx.token = _cfg.token; ctx.address = _address;
-    std::string json; RpcError re;
-    e = openReply(body, id, ctx, ReplyKind::Bound, _poolKey, &_key, json, &re, _cfg.limits);
-    if (e == Err::RpcError) { fail(e, "depinchallenge"); _last.rpc = re; return e; }
-    if (e != Err::Ok) return fail(e, "depinchallenge reply");
+    std::string json;
+    Err e = call(request, json);
+    if (e != Err::Ok) return e;
     DynamicJsonDocument doc(json.size() + 256);
     if (deserializeJson(doc, json) || doc.overflowed() || !doc.is<JsonObject>()) return fail(Err::ChallengeInvalid, "json");
     const char * ch = doc["challenge"] | "";
-    const char * ty = doc["type"] | "receive";
-    int exp = doc["expires_in"] | 30;
+    const char * ty = doc["type"] | "";
+    int exp = doc["expires_in"] | 0;
     if (!isHex64(ch) || strcmp(ty, "receive") != 0 || exp <= 0 || exp > 3600) return fail(Err::ChallengeInvalid, "fields");
     _challenge = ch;
     /* age from the request start, minus a safety margin */
@@ -372,7 +395,7 @@ Err DepinClient::ensureChallenge() {
     return _challengeValid ? Err::Ok : fail(Err::ChallengeInvalid, "ttl");
 }
 
-static Err normaliseRow(JsonObjectConst r, ReceivedItem & item, const Limits & limits) {
+static Err normaliseRow(JsonObjectConst r, ReceivedItem & item, const std::string & genesis, const Limits & limits) {
     item = ReceivedItem();
     if (r.isNull()) return Err::BadPage;
     const char * tok = r["token"] | (const char *)NULL;
@@ -384,7 +407,7 @@ static Err normaliseRow(JsonObjectConst r, ReceivedItem & item, const Limits & l
     if (!tok || !snd || !mt || !pl || !sg || !hs || !r["timestamp"].is<long long>()) return Err::BadPage;
     if (!isHex64(hs)) return Err::BadPage;
     DepinMessage & m = item.msg;
-    m.token = tok; m.sender = snd;
+    m.genesis = genesis; m.token = tok; m.sender = snd;
     m.timestamp = (int64_t)r["timestamp"].as<long long>();
     if (strcmp(mt, "private") == 0) m.type = DEPIN_TYPE_PRIVATE;
     else if (strcmp(mt, "group") == 0) m.type = DEPIN_TYPE_GROUP;
@@ -402,47 +425,70 @@ static Err normaliseRow(JsonObjectConst r, ReceivedItem & item, const Limits & l
     return eciesParse(m.payload.data(), m.payload.size(), v, limits);
 }
 
-Err DepinClient::receivePage(const std::string & afterHash, size_t limit, ReceivePage & out) {
+Err DepinClient::receivePage(const std::string & cursorText, size_t limit, ReceivePage & out) {
     out = ReceivePage();
     Err e = requireReady();
     if (e != Err::Ok) return e;
     if (limit == 0) limit = _cfg.pageLimit;
     if (limit > 1000) return fail(Err::BadArg, "limit");
-    if (!afterHash.empty() && !isHex64(afterHash)) return fail(Err::BadArg, "afterHash");
+    RpcRequest request;
+    request.method = "depinreceiveseq";
+    request.token = _cfg.token; request.address = _address; request.limit = limit;
+    if (!cursorText.empty()) {
+        DynamicJsonDocument cursor(1024);
+        if (cursorText.size() > 512 || deserializeJson(cursor, cursorText) ||
+            readCursor(cursor.as<JsonObjectConst>(), request, request.cursor) != Err::Ok)
+            return fail(Err::BadArg, "cursor");
+    }
     if ((e = ensureChallenge()) != Err::Ok) return e;
-
-    std::string pre, sig;
-    if ((e = usePreimage(false, _cfg.token, _address, _challenge, pre)) != Err::Ok) return fail(e, "DEPIN-GET");
-    if ((e = signPreimage(_key, pre, sig)) != Err::Ok) return fail(e, "sign DEPIN-GET");
-    std::string used = _challenge;
-    invalidateChallenge();                  /* consumed by the first valid use, whatever happens next */
-    char lim[16]; snprintf(lim, sizeof(lim), "%u", (unsigned)limit);
-    std::string params = "[" + q(_cfg.token) + "," + q(_address) + "," + q(used) + "," + q(sig) + ",0," + q(afterHash) + "," + lim + "]";
-    std::string id, body;
+    request.challenge = _challenge;
+    invalidateChallenge();
     uint32_t t0 = _clock.monotonicMs();
-    e = rpcCall("depinreceivemsg", params, id, body);
-    if (e != Err::Ok) return e;
-    ReplyContext ctx; ctx.method = "depinreceivemsg"; ctx.token = _cfg.token; ctx.address = _address; ctx.challenge = used;
-    std::string json; RpcError re;
-    Limits lim2 = _cfg.limits;
-    lim2.maxContent = _cfg.limits.maxReplyHex;   /* a page is much larger than one message */
-    e = openReply(body, id, ctx, ReplyKind::Bound, _poolKey, &_key, json, &re, lim2);
-    if (e == Err::RpcError) { fail(e, "depinreceivemsg"); _last.rpc = re; return e; }
-    if (e != Err::Ok) return fail(e, "depinreceivemsg reply");
-
+    std::string json;
+    if ((e = call(request, json)) != Err::Ok) return e;
     DynamicJsonDocument doc(json.size() + json.size() / 2 + 1024);
     if (deserializeJson(doc, json) || doc.overflowed() || !doc.is<JsonObject>()) return fail(Err::BadPage, "json");
     JsonObject o = doc.as<JsonObject>();
     if (!o["messages"].is<JsonArray>() || !o["has_more"].is<bool>()) return fail(Err::BadPage, "shape");
     JsonArray rows = o["messages"].as<JsonArray>();
     if (rows.size() > limit) return fail(Err::BadPage, "more rows than limit");
-    out.serverHasMore = o["has_more"].as<bool>();
-    out.received = rows.size();
+    ReceivePage page;
+    page.serverHasMore = o["has_more"].as<bool>();
+    page.received = rows.size();
 
+    SequenceCursor nextCursor;
+    if (readCursor(o["cursor"], request, nextCursor) != Err::Ok ||
+        (!request.cursor.stream.empty() && nextCursor.stream != request.cursor.stream) ||
+        nextCursor.after < request.cursor.after || (page.serverHasMore && nextCursor.after == request.cursor.after))
+        return fail(Err::BadPage, "sequence cursor");
+    int64_t previous = request.cursor.after;
+    for (JsonObjectConst r : rows) {
+        if (!r["sequence"].is<int64_t>()) return fail(Err::BadPage, "sequence");
+        int64_t seq = r["sequence"].as<int64_t>();
+        if (seq <= previous || seq > nextCursor.after) return fail(Err::BadPage, "sequence range");
+        previous = seq;
+        const char * senderKey = r["sender_pubkey_hex"] | "";
+        if (!*senderKey) return fail(Err::BadPage, "missing sender_pubkey_hex");
+        ReceivedItem item;
+        PublicKey pub;
+        if (normaliseRow(r, item, _cfg.expectedGenesis, _cfg.limits) != Err::Ok ||
+            !tokenInScope(item.msg.token, _cfg.token) || loadPublicKey(senderKey, pub) != Err::Ok ||
+            !pubKeyMatchesAddress(pub, item.msg.sender, _cfg.net) ||
+            messageVerify(item.msg, pub, item.hash.c_str()) != Err::Ok) { ++page.rejected; continue; }
+        item.verified = true;
+        EnvelopeContext context;
+        if (messageContext(item.msg, context) != Err::Ok ||
+            eciesDecrypt(item.msg.payload.data(), item.msg.payload.size(), _key, context, _address,
+                         item.content, _cfg.limits) != Err::Ok) { ++page.rejected; continue; }
+        item.decrypted = true;
+        page.messages.push_back(std::move(item));
+    }
+    serializeJson(o["cursor"], page.nextCursor);
+    page.shouldContinue = page.serverHasMore;
     /* chained challenge (may be absent if the node failed to issue one) */
     const char * next = o["next_challenge"] | (const char *)NULL;
     if (next && isHex64(next)) {
-        int exp = o["next_expires_in"] | 300;
+        int exp = o["next_expires_in"] | 0;
         if (exp > 0 && exp <= 3600) {
             _challenge = next;
             uint32_t ttl = (uint32_t)exp * 1000; ttl = ttl > 2000 ? ttl - 2000 : 0;
@@ -451,31 +497,7 @@ Err DepinClient::receivePage(const std::string & afterHash, size_t limit, Receiv
         }
     }
 
-    std::string lastHash;
-    for (JsonObjectConst r : rows) {
-        ReceivedItem item;
-        Err re2 = normaliseRow(r, item, _cfg.limits);
-        if (re2 != Err::Ok) { out.rejected++; continue; }       /* structurally invalid: no anchor from it */
-        if (!lastHash.empty() && lastHash == item.hash) { out.rejected++; continue; }   /* duplicate */
-        lastHash = item.hash;                                     /* examined row: transport cursor */
-        if (!tokenInScope(item.msg.token, _cfg.token)) { out.rejected++; continue; }
-        std::string senderKey;
-        if (getPubKey(item.msg.sender, senderKey) != Err::Ok) {
-            /* transient key resolution failure: keep the page consistent, do not advance past this row */
-            return fail(_last.err == Err::Ok ? Err::Transport : _last.err, "sender key " + item.msg.sender);
-        }
-        PublicKey pub;
-        if (loadPublicKey(senderKey, pub) != Err::Ok || !pubKeyMatchesAddress(pub, item.msg.sender, _cfg.net) ||
-            messageVerify(item.msg, pub, item.hash.c_str()) != Err::Ok) { out.rejected++; continue; }
-        item.verified = true;
-        if (eciesDecrypt(item.msg.payload.data(), item.msg.payload.size(), _key, item.content, _cfg.limits) != Err::Ok) {
-            out.rejected++; continue;
-        }
-        item.decrypted = true;
-        out.messages.push_back(item);
-    }
-    out.nextAfterHash = lastHash.empty() ? afterHash : lastHash;
-    out.shouldContinue = out.serverHasMore || (out.received == limit && out.received > 0);
+    out = std::move(page);
     return fail(Err::Ok);
 }
 

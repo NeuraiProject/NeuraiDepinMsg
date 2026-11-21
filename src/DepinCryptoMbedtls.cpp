@@ -17,26 +17,26 @@
 
 namespace {
 
-bool gcmEncrypt(const uint8_t key[32], const uint8_t nonce[12],
+bool gcmEncrypt(const uint8_t key[32], const uint8_t nonce[12], const uint8_t * aad, size_t aadLen,
                 const uint8_t * plaintext, size_t len, uint8_t * ciphertext, uint8_t tag[16]) {
     mbedtls_gcm_context gcm;
     mbedtls_gcm_init(&gcm);
     int ret = mbedtls_gcm_setkey(&gcm, MBEDTLS_CIPHER_ID_AES, key, 256);
     if (ret == 0) {
         ret = mbedtls_gcm_crypt_and_tag(&gcm, MBEDTLS_GCM_ENCRYPT, len, nonce, 12,
-                                        NULL, 0, plaintext, ciphertext, 16, tag);
+                                        aad, aadLen, plaintext, ciphertext, 16, tag);
     }
     mbedtls_gcm_free(&gcm);
     return ret == 0;
 }
 
-bool gcmDecrypt(const uint8_t key[32], const uint8_t nonce[12],
+bool gcmDecrypt(const uint8_t key[32], const uint8_t nonce[12], const uint8_t * aad, size_t aadLen,
                 const uint8_t * ciphertext, size_t len, const uint8_t tag[16], uint8_t * plaintext) {
     mbedtls_gcm_context gcm;
     mbedtls_gcm_init(&gcm);
     int ret = mbedtls_gcm_setkey(&gcm, MBEDTLS_CIPHER_ID_AES, key, 256);
     if (ret == 0) {
-        ret = mbedtls_gcm_auth_decrypt(&gcm, len, nonce, 12, NULL, 0, tag, 16, ciphertext, plaintext);
+        ret = mbedtls_gcm_auth_decrypt(&gcm, len, nonce, 12, aad, aadLen, tag, 16, ciphertext, plaintext);
     }
     mbedtls_gcm_free(&gcm);
     return ret == 0;

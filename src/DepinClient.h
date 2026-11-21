@@ -9,12 +9,12 @@
 #include "DepinReply.h"
 
 /*
- * Portable DePIN protocol 2 client core (plan v3 §6–§8, phase 3 scope):
+ * Portable DePIN protocol 6 client core:
  * bootstrap with a pin, group / private publishing with full recipient
  * resolution, and authenticated paged receiving with challenge chaining.
  *
  * Transport and clocks are injected so the whole flow runs on host against
- * a simulated node (test/host/test_client.cpp). NeuraiDepinClient.h is the
+ * a simulated node (tests/test_client.cpp). NeuraiDepinClient.h is the
  * Arduino wrapper (DepinTransport + real clocks + String API).
  *
  * Trust: nothing is sent or shown before bootstrap() authenticated the
@@ -57,8 +57,10 @@ struct ClientConfig {
     Pin         pin;                /* full pin for RequirePin, key for       */
                                     /* PinnedKeyDiscoverRoot, unused for TOFU */
     const ChainNetwork * net = NULL;/* NeuraiTest for testnet/regtest         */
+    std::string expectedGenesis;    // Set explicitly for regtest.
+    bool strictEcdsa = false;
     Limits      limits;
-    size_t      pageLimit = 2;      /* default depinreceivemsg limit          */
+    size_t      pageLimit = 2;      /* default depinreceiveseq limit          */
     size_t      pubKeyCacheSize = 32;
 };
 
@@ -79,9 +81,9 @@ struct ReceivedItem {
 
 struct ReceivePage {
     std::vector<ReceivedItem> messages;   /* fully verified + decrypted rows  */
-    std::string nextAfterHash;      /* transport cursor: last examined row    */
+    std::string nextCursor;      /* authenticated sequence cursor    */
     bool   serverHasMore = false;
-    bool   shouldContinue = false;  /* serverHasMore || page was full (§1.2)  */
+    bool   shouldContinue = false;  /* authenticated has_more  */
     size_t received = 0;            /* rows in the reply                      */
     size_t rejected = 0;            /* rows dropped (signature/scope/decrypt) */
 };
@@ -97,7 +99,7 @@ class DepinClient {
 public:
     DepinClient(RpcTransport & rpc, Clock & clock);
 
-    /* Load the identity (WIF, compressed, P2PKH on cfg.net) and the config. */
+    /* Load the identity (WIF, Legacy or strict ECDSA on cfg.net) and the config. */
     Err begin(const ClientConfig & cfg, const std::string & wif);
     const std::string & address() const { return _address; }
     const std::string & pubKeyHex() const { return _pubKeyHex; }
@@ -118,12 +120,12 @@ public:
     Err sendPrivate(const std::string & targetAddress, const std::string & content, SendResult & out);
     /* depingetancestorrecipients for cfg.token: authenticated, deduplicated,
      * sender included, total <= maxRecipients. */
-    Err resolveGroupRecipients(std::vector<std::vector<uint8_t> > & keys, SendResult & stats);
+    Err resolveGroupRecipients(RecipientKeys & keys, SendResult & stats);
     /* getpubkey with address binding and a bounded cache. */
     Err getPubKey(const std::string & address, std::string & pubKeyHex);
 
-    /* Receiving (§8.2). afterHash "" = from the beginning; limit <= 1000. */
-    Err receivePage(const std::string & afterHash, size_t limit, ReceivePage & out);
+    /* Receiving (§8.2). Empty cursor starts a sequence read. Pass the returned nextCursor to resume. */
+    Err receivePage(const std::string & cursorText, size_t limit, ReceivePage & out);
     /* Drop the live challenge (after an error the node state is unknown). */
     void invalidateChallenge();
     bool hasChallenge() const;
@@ -137,14 +139,16 @@ private:
     ClientConfig _cfg;
     PrivateKey _key;
     std::string _address, _pubKeyHex;
-    uint8_t _pubKey[33];
+    uint8_t _pubKey[65];
+    size_t _pubKeySize = 0;
     bool _began = false, _ready = false, _pinConfirmed = false;
     Pin _pin, _candidate;
     PoolInfo _info;
     PublicKey _poolKey;
     ClientError _last;
     uint32_t _callSeq = 0;
-    uint64_t _lastSignedMs = 0;
+    ServiceContext _service;
+    Err call(RpcRequest & request, std::string & json);
     /* live challenge */
     std::string _challenge;
     uint32_t _challengeExpiresMono = 0;
@@ -159,12 +163,11 @@ private:
     Err requireReady();
     Err ensureChallenge();
     Err send(const std::string & content, uint8_t type,
-             const std::vector<std::vector<uint8_t> > & recipients, SendResult & out);
+             const RecipientKeys & recipients, SendResult & out);
     void cachePut(const std::string & address, const std::string & hex);
 };
 
 /* helpers shared with tests / wrappers */
-bool tokenInScope(const std::string & messageToken, const std::string & scope);
 std::string jsonEscape(const std::string & s);
 
 } // namespace depin

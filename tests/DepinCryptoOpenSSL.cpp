@@ -18,7 +18,7 @@ void depinTestSetDeterministicRng(bool on, uint64_t seed) {
 
 namespace {
 
-bool gcmEncrypt(const uint8_t key[32], const uint8_t nonce[12],
+bool gcmEncrypt(const uint8_t key[32], const uint8_t nonce[12], const uint8_t * aad, size_t aadLen,
                 const uint8_t * plaintext, size_t len, uint8_t * ciphertext, uint8_t tag[16]) {
     EVP_CIPHER_CTX * ctx = EVP_CIPHER_CTX_new();
     if (!ctx) return false;
@@ -28,6 +28,7 @@ bool gcmEncrypt(const uint8_t key[32], const uint8_t nonce[12],
         if (EVP_EncryptInit_ex(ctx, EVP_aes_256_gcm(), NULL, NULL, NULL) != 1) break;
         if (EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_IVLEN, 12, NULL) != 1) break;
         if (EVP_EncryptInit_ex(ctx, NULL, NULL, key, nonce) != 1) break;
+        if (aadLen && EVP_EncryptUpdate(ctx, NULL, &outl, aad, (int)aadLen) != 1) break;
         if (len && EVP_EncryptUpdate(ctx, ciphertext, &outl, plaintext, (int)len) != 1) break;
         if (EVP_EncryptFinal_ex(ctx, ciphertext + outl, &fl) != 1) break;
         if (EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_GET_TAG, 16, tag) != 1) break;
@@ -37,7 +38,7 @@ bool gcmEncrypt(const uint8_t key[32], const uint8_t nonce[12],
     return ok;
 }
 
-bool gcmDecrypt(const uint8_t key[32], const uint8_t nonce[12],
+bool gcmDecrypt(const uint8_t key[32], const uint8_t nonce[12], const uint8_t * aad, size_t aadLen,
                 const uint8_t * ciphertext, size_t len, const uint8_t tag[16], uint8_t * plaintext) {
     EVP_CIPHER_CTX * ctx = EVP_CIPHER_CTX_new();
     if (!ctx) return false;
@@ -49,6 +50,7 @@ bool gcmDecrypt(const uint8_t key[32], const uint8_t nonce[12],
         if (EVP_DecryptInit_ex(ctx, EVP_aes_256_gcm(), NULL, NULL, NULL) != 1) break;
         if (EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_IVLEN, 12, NULL) != 1) break;
         if (EVP_DecryptInit_ex(ctx, NULL, NULL, key, nonce) != 1) break;
+        if (aadLen && EVP_DecryptUpdate(ctx, NULL, &outl, aad, (int)aadLen) != 1) break;
         if (len && EVP_DecryptUpdate(ctx, plaintext, &outl, ciphertext, (int)len) != 1) break;
         if (EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_TAG, 16, tagCopy) != 1) break;
         if (EVP_DecryptFinal_ex(ctx, plaintext ? plaintext + outl : NULL, &fl) != 1) break;   /* tag check */

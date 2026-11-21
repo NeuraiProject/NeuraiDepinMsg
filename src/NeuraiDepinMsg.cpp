@@ -33,15 +33,16 @@ DepinMessageResult NeuraiDepinMsg::buildDepinMessage(const DepinParams & params)
     if (e != Err::Ok) { fail(e); r.error = e; return r; }
 
     /* the sender's key must be the one behind senderPubKey / senderAddress */
-    uint8_t mySec[33];
+    uint8_t mySec[65];
+    size_t mySecLen;
     {
         PublicKey mine = key.publicKey();
-        mine.compressed = true;
-        if (!mine.isValid() || mine.sec(mySec, 33) != 33) { fail(Err::BadPrivKey); r.error = Err::BadPrivKey; return r; }
+        mySecLen = mine.sec(mySec, sizeof(mySec));
+        if (!mine.isValid() || (mySecLen != 33 && mySecLen != 65)) { fail(Err::BadPrivKey); r.error = Err::BadPrivKey; return r; }
         if (params.senderPubKey.length()) {
             std::vector<uint8_t> given;
-            if (hexToVec(params.senderPubKey, given, 33) != Err::Ok || given.size() != 33 ||
-                memcmp(given.data(), mySec, 33) != 0) {
+            if (hexToVec(params.senderPubKey, given, 65) != Err::Ok || given.size() != mySecLen ||
+                memcmp(given.data(), mySec, mySecLen) != 0) {
                 fail(Err::BadPubKey); r.error = Err::BadPubKey; return r;
             }
         }
@@ -55,18 +56,21 @@ DepinMessageResult NeuraiDepinMsg::buildDepinMessage(const DepinParams & params)
     else if (params.messageType == "group") type = DEPIN_TYPE_GROUP;
     else { fail(Err::BadMessageType); r.error = Err::BadMessageType; return r; }
 
-    std::vector<std::vector<uint8_t> > recipients;
+    depin::RecipientKeys recipients;
+    if (!params.recipientAddresses.empty() && params.recipientAddresses.size() != params.recipientPubKeys.size()) {
+        fail(Err::BadField); r.error = Err::BadField; return r;
+    }
     recipients.reserve(params.recipientPubKeys.size() + 1);
     for (size_t i = 0; i < params.recipientPubKeys.size(); i++) {
         std::vector<uint8_t> pk;
-        e = hexToVec(params.recipientPubKeys[i], pk, 33);
-        if (e != Err::Ok || pk.size() != 33) { fail(Err::BadPubKey); r.error = Err::BadPubKey; return r; }
-        recipients.push_back(pk);
+        e = hexToVec(params.recipientPubKeys[i], pk, 65);
+        if (e != Err::Ok || (pk.size() != 33 && pk.size() != 65)) { fail(Err::BadPubKey); r.error = Err::BadPubKey; return r; }
+        recipients.push_back({pk, params.recipientAddresses.empty() ? "" : toStd(params.recipientAddresses[i])});
     }
-    if (params.includeSender) recipients.push_back(std::vector<uint8_t>(mySec, mySec + 33));
+    if (params.includeSender) recipients.push_back({std::vector<uint8_t>(mySec, mySec + mySecLen), toStd(params.senderAddress)});
 
     depin::DepinMessage m;
-    e = depin::messageBuild(toStd(params.token), toStd(params.senderAddress),
+    e = depin::messageBuild(toStd(params.genesis), toStd(params.token), toStd(params.senderAddress),
                             (int64_t)params.timestamp, type,
                             (const uint8_t *)params.message.c_str(), params.message.length(),
                             recipients, key, m, s_limits);
@@ -86,25 +90,25 @@ DepinMessageResult NeuraiDepinMsg::buildDepinMessage(const DepinParams & params)
 
 /* ── decrypt ─────────────────────────────────────────────────────────────── */
 
-Err NeuraiDepinMsg::decryptPayload(const char * encryptedPayloadHex, const PrivateKey & key,
+Err NeuraiDepinMsg::decryptPayload(const DepinReceivedMessage & message, const String & recipientAddress, const PrivateKey & key,
                                    std::vector<uint8_t> & plaintext) {
     plaintext.clear();
     s_lastError = Err::Ok;
-    if (!encryptedPayloadHex) { fail(Err::BadArg); return Err::BadArg; }
-    std::vector<uint8_t> env;
-    Err e = hexToVec(String(encryptedPayloadHex), env, s_limits.maxPayload);
-    if (e != Err::Ok) { fail(e); return e; }
-    e = depin::eciesDecrypt(env.data(), env.size(), key, plaintext, s_limits);
+    depin::EnvelopeContext context;
+    const auto & m = message.msg;
+    Err e = depin::messageContext(m, context);
+    if (e == Err::Ok) e = depin::eciesDecrypt(m.payload.data(), m.payload.size(), key, context,
+                                               toStd(recipientAddress), plaintext, s_limits);
     if (e != Err::Ok) fail(e);
     return e;
 }
 
-String NeuraiDepinMsg::decryptPayload(const char * encryptedPayloadHex, const String & recipientPrivateKey) {
+String NeuraiDepinMsg::decryptPayload(const DepinReceivedMessage & message, const String & recipientAddress, const String & recipientPrivateKey) {
     PrivateKey key;
     Err e = depin::loadPrivateKey(toStd(recipientPrivateKey), key);
     if (e != Err::Ok) { fail(e); return String(""); }
     std::vector<uint8_t> pt;
-    if (decryptPayload(encryptedPayloadHex, key, pt) != Err::Ok) return String("");
+    if (decryptPayload(message, recipientAddress, key, pt) != Err::Ok) return String("");
     String out;
     out.reserve(pt.size());
     for (size_t i = 0; i < pt.size(); i++) out += (char)pt[i];
@@ -114,20 +118,20 @@ String NeuraiDepinMsg::decryptPayload(const char * encryptedPayloadHex, const St
 
 /* ── pool envelope ───────────────────────────────────────────────────────── */
 
-String NeuraiDepinMsg::wrapMessageForServer(const String & messageHex, const String & serverPubKeyHex) {
+String NeuraiDepinMsg::wrapMessageForServer(const String & genesis, const String & messageHex, const String & serverPubKeyHex) {
     s_lastError = Err::Ok;
     std::vector<uint8_t> pool;
     Err e = hexToVec(serverPubKeyHex, pool, 33);
     if (e != Err::Ok || pool.size() != 33) { fail(Err::BadPubKey); return String(""); }
     std::vector<uint8_t> env;
-    e = depin::wrapForPool(toStd(messageHex), pool.data(), env, s_limits);
+    e = depin::wrapForPool(toStd(genesis), toStd(messageHex), pool.data(), env, s_limits);
     if (e != Err::Ok) { fail(e); return String(""); }
     return String(depin::hexEncode(env.data(), env.size()).c_str());
 }
 
 /* ── received messages ───────────────────────────────────────────────────── */
 
-Err NeuraiDepinMsg::fromRpcFields(const String & token, const String & sender, int64_t timestamp,
+Err NeuraiDepinMsg::fromRpcFields(const String & genesis, const String & token, const String & sender, int64_t timestamp,
                                   const String & messageType, const String & encryptedPayloadHex,
                                   const String & signatureHex, const String & hashHex,
                                   DepinReceivedMessage & out) {
@@ -135,6 +139,7 @@ Err NeuraiDepinMsg::fromRpcFields(const String & token, const String & sender, i
     out.verified = false;
     depin::DepinMessage & m = out.msg;
     m = depin::DepinMessage();
+    m.genesis = toStd(genesis);
     m.token = toStd(token);
     m.sender = toStd(sender);
     m.timestamp = timestamp;
@@ -159,16 +164,13 @@ Err NeuraiDepinMsg::fromRpcFields(const String & token, const String & sender, i
     return Err::Ok;
 }
 
-Err NeuraiDepinMsg::parseDepinMessage(const String & messageHex, DepinReceivedMessage & out) {
+Err NeuraiDepinMsg::parseDepinMessage(const String & genesis, const String & messageHex, DepinReceivedMessage & out) {
     s_lastError = Err::Ok;
     out.verified = false;
     std::vector<uint8_t> wire;
     Err e = hexToVec(messageHex, wire, s_limits.maxPayload + 512);
     if (e != Err::Ok) { fail(e); return e; }
-    e = depin::messageParse(wire.data(), wire.size(), out.msg, s_limits);
-    if (e != Err::Ok) { fail(e); return e; }
-    depin::EciesView v;
-    e = depin::eciesParse(out.msg.payload.data(), out.msg.payload.size(), v, s_limits);
+    e = depin::messageParse(wire.data(), wire.size(), toStd(genesis), out.msg, s_limits);
     if (e != Err::Ok) { fail(e); return e; }
     out.hash = String(out.msg.hash().c_str());
     return Err::Ok;

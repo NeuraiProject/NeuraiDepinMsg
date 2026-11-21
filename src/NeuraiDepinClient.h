@@ -7,27 +7,26 @@
 #include "DepinTransport.h"
 
 /*
- * Arduino / ESP32 DePIN Messaging Protocol 2 client.
+ * Arduino / ESP32 DePIN Messaging Protocol 6 client.
  *
  * A thin wrapper over the portable depin::DepinClient: it supplies the real
  * transport (DepinTransport: HTTPS, byte budget, Retry-After), the wall and
- * monotonic clocks (gettimeofday / millis) and a String-based API close to
- * the 1.0.0 one. Everything security-relevant lives in the portable core and
+ * monotonic clocks (gettimeofday / millis) and a String-based API. Everything security-relevant lives in the portable core and
  * is covered by the host tests.
  *
- * Trust (plan v3 §4): the recommended, unattended setup ships a full pin —
+ * An unattended setup ships a full pin —
  * service URL, pool root token and pool public key — with the firmware:
  *
  *     NeuraiDepinClient depin;
  *     depin.setCACert(ROOT_CA_PEM);                       // TLS trust anchor
- *     depin.setPoolPin("03649c7a…", "&TEST");             // pool key, pool root
- *     depin.begin("https://rpc-testnet-depin.neurai.org", "&TEST/SEC", myWIF);
+ *     depin.setPoolPin(poolPubKey, poolRoot);             // pool key, pool root
+ *     depin.begin(rpcUrl, channel, myWIF);
  *     if (!depin.bootstrap()) { Serial.println(depin.lastErrorName()); ... }
  *
  * Without a pin, TOFU must be enabled explicitly (setTrustMode) and the
  * candidate accepted with acceptPin() by the application's own policy.
  *
- * Time: DEPIN-REQ needs the real Unix time in milliseconds. Sync NTP (or an
+ * Time: RPC 6 needs the real Unix time in milliseconds. Sync NTP (or an
  * RTC) before calling; the client refuses to sign with an unset clock.
  */
 
@@ -62,6 +61,8 @@ public:
     void setTimeout(uint32_t ms)          { _transport.setTimeout(ms); }
     void setMaxResponseBytes(size_t n)    { _transport.setMaxResponseBytes(n); }
     void setNetwork(const ChainNetwork * net) { _cfg.net = net; }
+    void setExpectedGenesis(const String & hash) { _cfg.expectedGenesis = hash.c_str(); }
+    void setStrictEcdsa(bool enabled) { _cfg.strictEcdsa = enabled; }
     void setTrustMode(depin::TrustMode m) { _cfg.trust = m; }
     /* Full pin: pool public key (66 hex) + pool root token. */
     void setPoolPin(const String & poolPubKeyHex, const String & rootToken);
@@ -70,7 +71,7 @@ public:
 
     /* ── lifecycle ──────────────────────────────────────────────────────── */
     /* Base URL ("https://host") or full RPC URL; token = channel; WIF of the
-     * holder (compressed, revealed on chain). */
+     * holder (revealed on chain). */
     bool begin(const String & rpcUrl, const String & token, const String & wif);
     /* depingetmsginfo + trust decision. Returns true when ready to operate
      * (with TOFU it returns false until acceptPin()). */
@@ -92,12 +93,6 @@ public:
     /* ── receiving ──────────────────────────────────────────────────────── */
     /* One authenticated page after `cursor` ("" = from the start). */
     DepinPageResult receivePage(const String & cursor, size_t limit = 0);
-    /* 1.0.0-style adapter: pulls one page after `lastHash`, updates
-     * lastTimestamp/lastHash to the last examined row. Prefer receivePage(). */
-    std::vector<IncomingMessage> receiveMessages(uint64_t & lastTimestamp, int limit = 0, String lastHash = "");
-    String lastReceiveCursor() const      { return _lastCursor; }
-    bool   hasMore() const                { return _lastShouldContinue; }
-
     /* ── diagnostics ────────────────────────────────────────────────────── */
     String getMyAddress() const           { return String(_core.address().c_str()); }
     String getMyPubKey() const            { return String(_core.pubKeyHex().c_str()); }
@@ -124,8 +119,6 @@ private:
     depin::DepinClient _core;
     depin::ClientConfig _cfg;
     bool _debug = false;
-    String _lastCursor;
-    bool _lastShouldContinue = false;
     static String fmtTime(uint64_t ts);
 };
 

@@ -1,7 +1,7 @@
 /*
- * EasyMessaging — minimal DePIN Messaging Protocol 2 client on an ESP32.
+ * EasyMessaging — minimal DePIN Messaging Protocol 6 client on an ESP32.
  *
- * Unattended-device setup (plan v3 §4): the firmware ships a FULL PIN — the
+ * Unattended devices are provisioned with a full pin — the
  * service URL, the pool root token and the pool public key — so nothing is
  * trusted on first contact and no button has to be pressed. Ask the project
  * running the pool for its `depinpoolpkey` and root token, and paste them
@@ -10,7 +10,7 @@
  * Requirements:
  *   - Wi-Fi and a synced clock (NTP below): challenge requests carry the
  *     real Unix time in milliseconds and are refused with a wrong clock.
- *   - A holder key: WIF of a P2PKH address that holds the token AND has
+ *   - A holder key: WIF for a Legacy P2PKH or strict ECDSA address that holds the token and has
  *     revealed its public key on chain (it must have spent at least once).
  *   - The CA certificate of the RPC endpoint (TLS). setInsecure(true) exists
  *     for lab use only.
@@ -27,12 +27,12 @@
 const char * ssid     = "Name_Wifi";
 const char * password = "Pass_Wifi";
 
-const char * rpcUrl      = "https://rpc-testnet-depin.neurai.org";   // base URL: "/rpc" is added once
-const char * poolRoot    = "&TEST";                                   // pool root token (from depingetmsginfo)
-const char * poolPubKey  = "03649c7a094c76b63995e60f891c13d9440b12b65b46ad8426cb153789e816b01b"; // depinpoolpkey (66 hex)
-const char * channel     = "&TEST/SEC";                               // token this device talks on
-const char * myWIF       = "cW8vy4nJ...";                             // holder key (compressed WIF) — load from NVS in production
-const char * destAddress = "tRERn8G265FxuHmiWVYtZ84ntQjW56BF8n";     // private message target
+const char * rpcUrl      = "https://YOUR_RPC_HOST";   // base URL: "/rpc" is added once
+const char * poolRoot    = "&YOURPOOL";                                   // pool root token (from depingetmsginfo)
+const char * poolPubKey  = "YOUR_66_HEX_POOL_PUBLIC_KEY"; // depinpoolpkey (66 hex)
+const char * channel     = "&YOURPOOL/CHANNEL";                               // token this device talks on
+const char * myWIF       = "YOUR_HOLDER_WIF";                             // holder key (compressed WIF) — load from NVS in production
+const char * destAddress = "YOUR_RECIPIENT_ADDRESS";     // private message target
 
 // Root CA of the RPC endpoint (PEM). Leave NULL only with setInsecure(true).
 const char * rootCA = NULL;
@@ -72,7 +72,7 @@ static void pollOnce() {
 void setup() {
   Serial.begin(115200);
   delay(1000);
-  Serial.println("\n--- Neurai DePIN messaging (protocol 2) ---");
+  Serial.println("\n--- Neurai DePIN messaging (protocol 6) ---");
 
   WiFi.begin(ssid, password);
   Serial.print("Connecting WiFi");
@@ -81,6 +81,8 @@ void setup() {
   waitForClock();
 
   if (rootCA) client.setCACert(rootCA); else client.setInsecure(true);   // lab only
+  // For regtest, set the trusted block-zero hash with client.setExpectedGenesis(...).
+  // For a strict ECDSA holder, call client.setStrictEcdsa(true) before begin().
   client.setPoolPin(poolPubKey, poolRoot);   // full pin: RequirePin, no TOFU
   client.setPageLimit(pageSize);
   client.setDebug(true);

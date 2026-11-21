@@ -1,5 +1,6 @@
 #include "DepinAuth.h"
 #include "Message.h"
+#include "NeuraiPQ.h"
 #include "Hash.h"
 #include "Conversion.h"
 #include <string.h>
@@ -25,7 +26,23 @@ bool validPreimageField(const std::string & s, size_t max) {
 }
 
 bool validToken(const std::string & token, const Limits & lim) {
-    return validPreimageField(token, lim.maxToken) && token.size() >= 2 && token[0] == '&';
+    if (token.empty() || token[0] != '&' || token.size() > 120 || token.size() > lim.maxToken) return false;
+    size_t start = 0;
+    for (size_t i = 1; i < token.size(); ++i) {
+        char c = token[i];
+        if (c == '/') {
+            if (i - start < 3) return false;
+            start = i + 1;
+        } else if (!(c >= 'A' && c <= 'Z') && !(c >= '0' && c <= '9') && c != '.' && c != '_') return false;
+    }
+    return token.size() - start >= (start ? 3u : 4u);
+}
+
+bool tokenInScope(const std::string & messageToken, const std::string & scope) {
+    if (!validToken(scope) || !validToken(messageToken)) return false;
+    if (messageToken == scope) return true;
+    return messageToken.size() > scope.size() + 1 &&
+           messageToken.compare(0, scope.size(), scope) == 0 && messageToken[scope.size()] == '/';
 }
 
 bool validChallenge(const std::string & challenge) {
@@ -35,53 +52,6 @@ bool validChallenge(const std::string & challenge) {
         if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return false;
     }
     return true;
-}
-
-static bool validAddress(const std::string & a) { return validPreimageField(a, 64); }
-
-/* ── preimages ───────────────────────────────────────────────────────────── */
-
-Err requestPreimage(const std::string & type, const std::string & token,
-                    const std::string & address, uint64_t unixMs, std::string & out) {
-    out.clear();
-    if (type != "receive" && type != "admin") return Err::BadPreimageField;
-    if (!validToken(token) || !validAddress(address)) return Err::BadPreimageField;
-    if (unixMs < 1000000000000ULL) return Err::BadPreimageField;    /* not a real ms clock */
-    char ms[24];
-    snprintf(ms, sizeof(ms), "%llu", (unsigned long long)unixMs);
-    out.reserve(16 + type.size() + token.size() + address.size() + 24);
-    out = "DEPIN-REQ|"; out += type; out += '|'; out += token; out += '|'; out += address; out += '|'; out += ms;
-    return Err::Ok;
-}
-
-Err usePreimage(bool clear, const std::string & token, const std::string & address,
-                const std::string & challenge, std::string & out) {
-    out.clear();
-    if (!validToken(token) || !validAddress(address) || !validChallenge(challenge)) return Err::BadPreimageField;
-    out = clear ? "DEPIN-CLEAR|" : "DEPIN-GET|";
-    out += token; out += '|'; out += address; out += '|'; out += challenge;
-    return Err::Ok;
-}
-
-Err replyPreimage(const std::string & method, const std::string & token,
-                  const std::string & address, const std::string & challenge,
-                  const std::string & bodyStr, std::string & out) {
-    out.clear();
-    if (!validPreimageField(method, 40)) return Err::BadPreimageField;
-    if (!token.empty() && !validToken(token)) return Err::BadPreimageField;
-    if (!address.empty() && !validAddress(address)) return Err::BadPreimageField;
-    if (!challenge.empty() && !validChallenge(challenge)) return Err::BadPreimageField;
-    if (bodyStr.empty()) return Err::BadPreimageField;
-    out.reserve(16 + method.size() + token.size() + address.size() + challenge.size() + 64);
-    out = "DEPIN-RESP|"; out += method; out += '|'; out += token; out += '|'; out += address; out += '|';
-    out += challenge; out += '|'; out += sha256Hex(bodyStr);
-    return Err::Ok;
-}
-
-std::string sha256Hex(const std::string & s) {
-    uint8_t h[32];
-    sha256((const uint8_t *)s.data(), s.size(), h);
-    return hexEncode(h, 32);
 }
 
 /* ── signatures ──────────────────────────────────────────────────────────── */
@@ -100,16 +70,32 @@ static Err checkProfile(const std::string & sigB64) {
     return Err::Ok;
 }
 
-Err signPreimage(const PrivateKey & key, const std::string & preimage, std::string & sigB64) {
+Err signPreimage(const PrivateKey & key, const std::string & preimage, std::string & sigB64, const std::string & address) {
     sigB64.clear();
     if (preimage.empty()) return Err::BadArg;
     PublicKey pub = key.publicKey();
-    if (!pub.isValid() || !pub.compressed) return Err::BadPrivKey;
+    if (!pub.isValid() || (address.empty() && !pub.compressed)) return Err::BadPrivKey;
     char buf[NEURAI_MESSAGE_SIG_B64_LEN + 1];
-    if (signMessageBase64(key, (const uint8_t *)preimage.data(), preimage.size(), buf, sizeof(buf)) != NEURAI_MESSAGE_SIG_B64_LEN)
+    if (!address.empty() && !pubKeyMatchesAddress(pub, address)) return Err::BadPubKey;
+    uint8_t version, program[32];
+    if (!address.empty() && authScriptAddressDecode(address.c_str(), &version, NULL, program)) {
+        const char domain[] = "Neurai Strict AuthScript Message";
+        uint8_t original[32], digest[32], compact[65], bin[65];
+        messageMagicHash((const uint8_t *)preimage.data(), preimage.size(), original);
+        DoubleSha h;
+        h.begin(); h.write(sizeof(domain)-1); h.write((const uint8_t *)domain, sizeof(domain)-1);
+        h.write(version); h.write(program, 32); h.write(original, 32); h.end(digest);
+        Signature sig = key.sign(digest);
+        if (!sig.isValid()) return Err::Crypto;
+        sig.bin(bin, sizeof(bin));
+        compact[0] = 31 + (bin[64] & 3);
+        memcpy(compact+1, bin, 64);
+        if (toBase64(compact, sizeof(compact), buf, sizeof(buf)) != 88) return Err::Crypto;
+        buf[88] = 0;
+    } else if (signMessageBase64(key, (const uint8_t *)preimage.data(), preimage.size(), buf, sizeof(buf)) != NEURAI_MESSAGE_SIG_B64_LEN)
         return Err::Crypto;
     sigB64 = buf;
-    return checkProfile(sigB64);
+    return pub.compressed ? checkProfile(sigB64) : Err::Ok;
 }
 
 Err recoverSigner(const std::string & preimage, const std::string & sigB64, std::string & pubKeyHex) {
@@ -139,7 +125,6 @@ Err verifyPoolSig(const PublicKey & poolKey, const std::string & preimage, const
 
 std::string addressForKey(const PublicKey & key, const ChainNetwork * net) {
     PublicKey k = key;
-    k.compressed = true;
     char buf[64];
     int n = k.address(buf, sizeof(buf), net ? net : &DEFAULT_NETWORK);
     if (n <= 0) return std::string();

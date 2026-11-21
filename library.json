@@ -1,7 +1,7 @@
 {
     "name": "NeuraiDepinMsg",
-    "version": "1.1.0",
-    "description": "Build, encrypt, sign, verify and decrypt Neurai DePIN Messaging Protocol 2 messages on ESP32. Requires uNeurai >= 0.0.11 and ArduinoJson 6.",
+    "version": "2.0.0",
+    "description": "Build, encrypt, sign, verify and decrypt Neurai DePIN Messaging Protocol 6 messages on ESP32. Requires uNeurai >= 0.3.1 and ArduinoJson 6.",
     "keywords": "neurai, depin, iot, esp32",
     "repository": {
         "type": "git",
@@ -17,7 +17,7 @@
     "license": "MIT",
     "homepage": "https://neurai.org",
     "dependencies": {
-        "uNeurai": "^0.0.11",
+        "uNeurai": "^0.3.1",
         "bblanchon/ArduinoJson": "^6.21.0"
     },
     "frameworks": "arduino",

@@ -8,7 +8,7 @@
  * Symmetric-crypto and randomness backend for the DePIN codec.
  *
  * The codec (DepinCodec.h) only needs AES-256-GCM with 12-byte nonces and
- * 16-byte tags, no AAD, plus a cryptographic random source. Both are
+ * 16-byte tags, optional AAD, plus a cryptographic random source. Both are
  * platform-specific, so they are supplied through this small table:
  *
  *   - ESP32 / Arduino: DepinCryptoMbedtls.cpp supplies mbedTLS + esp_fill_random
@@ -25,11 +25,11 @@ namespace depin {
 
 struct CryptoBackend {
     /* ciphertext has the same length as the plaintext; tag is 16 bytes */
-    bool (*aesGcmEncrypt)(const uint8_t key[32], const uint8_t nonce[12],
+    bool (*aesGcmEncrypt)(const uint8_t key[32], const uint8_t nonce[12], const uint8_t * aad, size_t aadLen,
                           const uint8_t * plaintext, size_t len,
                           uint8_t * ciphertext, uint8_t tag[16]);
     /* returns false (and writes nothing usable) if the tag does not verify */
-    bool (*aesGcmDecrypt)(const uint8_t key[32], const uint8_t nonce[12],
+    bool (*aesGcmDecrypt)(const uint8_t key[32], const uint8_t nonce[12], const uint8_t * aad, size_t aadLen,
                           const uint8_t * ciphertext, size_t len, const uint8_t tag[16],
                           uint8_t * plaintext);
     /* cryptographically secure random bytes */

@@ -32,7 +32,7 @@ uint64_t NeuraiDepinClient::Clocks::unixMs() {
 
 NeuraiDepinClient::NeuraiDepinClient()
     : _rpc(_transport, &_debug), _core(_rpc, _clock) {
-    _cfg.net = &NeuraiTest;             /* protocol 2 is live on testnet/regtest */
+    _cfg.net = &NeuraiTest;             /* protocol 6 is live on testnet/regtest */
     _cfg.trust = depin::TrustMode::RequirePin;
 }
 
@@ -49,7 +49,6 @@ bool NeuraiDepinClient::begin(const String & rpcUrl, const String & token, const
     _cfg.serviceId = std::string(_transport.url().c_str(), _transport.url().length());
     _cfg.pin.serviceId = _cfg.serviceId;
     _cfg.token = std::string(token.c_str(), token.length());
-    _lastCursor = ""; _lastShouldContinue = false;
     return _core.begin(_cfg, std::string(wif.c_str(), wif.length())) == depin::Err::Ok;
 }
 
@@ -61,7 +60,9 @@ String NeuraiDepinClient::lastErrorDetail() const {
     const depin::ClientError & e = _core.lastError();
     String s(e.detail.c_str());
     if (e.err == depin::Err::RpcError) {
-        s += " rpc "; s += e.rpc.code; s += ": "; s += e.rpc.message.c_str();
+        s += " rpc "; s += e.rpc.code;
+        if (!e.rpc.reason.empty()) { s += " "; s += e.rpc.reason.c_str(); }
+        s += ": "; s += e.rpc.message.c_str();
     }
     return s;
 }
@@ -102,7 +103,7 @@ DepinPageResult NeuraiDepinClient::receivePage(const String & cursor, size_t lim
     out.rejected = page.rejected;
     out.serverHasMore = page.serverHasMore;
     out.shouldContinue = page.shouldContinue;
-    out.nextCursor = String(page.nextAfterHash.c_str());
+    out.nextCursor = String(page.nextCursor.c_str());
     out.messages.reserve(page.messages.size());
     for (size_t i = 0; i < page.messages.size(); i++) {
         const depin::ReceivedItem & it = page.messages[i];
@@ -119,16 +120,7 @@ DepinPageResult NeuraiDepinClient::receivePage(const String & cursor, size_t lim
         for (size_t k = 0; k < it.content.size(); k++) m.content += (char)it.content[k];
         out.messages.push_back(m);
     }
-    _lastCursor = out.nextCursor;
-    _lastShouldContinue = out.shouldContinue;
     return out;
-}
-
-std::vector<IncomingMessage> NeuraiDepinClient::receiveMessages(uint64_t & lastTimestamp, int limit, String lastHash) {
-    DepinPageResult page = receivePage(lastHash, limit > 0 ? (size_t)limit : 0);
-    for (size_t i = 0; i < page.messages.size(); i++)
-        if (page.messages[i].timestamp > lastTimestamp) lastTimestamp = page.messages[i].timestamp;
-    return page.messages;
 }
 
 #endif /* ESP32 */

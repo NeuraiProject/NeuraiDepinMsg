@@ -1,6 +1,6 @@
 # NeuraiDepinMsg for ESP32
 
-An Arduino C++ client and codec for **Neurai DePIN Messaging Protocol 2**.
+An Arduino C++ client and codec for **Neurai DePIN Messaging Protocol 6**.
 Send encrypted group and private messages, verify signed pool replies, and
 receive authenticated messages through Neurai Core RPC.
 
@@ -10,28 +10,27 @@ parse, verify, and decrypt messages with your own transport.
 ## Features
 
 - Group messaging with on-chain recipient discovery and private messaging to a specific address.
-- Hybrid ECIES encryption using secp256k1 and AES-256-GCM, with sender signature verification.
+- Format-3 ECIES envelopes with HKDF-SHA256, AES-256-GCM and a content-key commitment. The message digest binds the chain genesis, token, exact sender address, timestamp, type and envelope.
 - Explicit pool public-key and root-token pinning, plus HTTPS certificate verification.
-- Authenticated challenges, cursor-based pagination, and configurable response and message limits.
+- Signed RPC 6 requests, request-bound pool replies and admission-sequence pagination.
 - Typed errors for transport, RPC, trust, signature, and decoding failures.
 - Compatibility with Neurai Core and the JavaScript `@neuraiproject/neurai-depin-msg` library.
 
 ## Dependencies and installation
 
-The hardware configuration validated so far is **ESP32-S3**, using
+The build target is **ESP32-S3**. The examples compile using
 Arduino-ESP32 **2.0.17** through PlatformIO's `espressif32` **7.0.1** platform.
 
 | Dependency | Validated version | Purpose |
 | --- | --- | --- |
-| [uNeurai](https://github.com/NeuraiProject/uNeurai) | 0.0.11 | Keys, addresses, hashing, and secp256k1 signatures |
+| [uNeurai](https://github.com/NeuraiProject/uNeurai) | 0.3.1 | Keys, addresses, hashing, and secp256k1 signatures |
 | [ArduinoJson](https://github.com/bblanchon/ArduinoJson) | 6.21.6 | RPC request and response processing |
 | [mldsa-esp32](https://github.com/NeuraiProject/mldsa-esp32) | 0.2.0 | Required by the tested uNeurai configuration |
 | mbedTLS | Bundled with Arduino-ESP32 | AES-GCM and TLS |
 
 Clone or download this repository into your Arduino sketchbook's `libraries`
-directory as `NeuraiDepinMsg`, and install the dependencies above. Use
-**ArduinoJson 6**, not version 7: the Arduino dependency manifest currently
-specifies a minimum version and does not enforce that upper bound.
+directory as `NeuraiDepinMsg`, and install the dependencies above.
+Both dependency manifests require **ArduinoJson 6.21 or later within 6.x**.
 
 The tested uNeurai configuration enables post-quantum support and therefore
 needs `mldsa-esp32`; DePIN message signatures themselves use secp256k1.
@@ -48,7 +47,7 @@ Obtain these settings from the operator of your DePIN pool:
 - The RPC service URL and its TLS root CA certificate in PEM format.
 - The pool's compressed public key: **66 hexadecimal characters**, obtained through a trusted channel.
 - The pool root token and the channel token, for example `&TEST` and `&TEST/SEC` in a local regtest fixture.
-- A compressed WIF for a P2PKH identity authorized for that channel. Its public key must be revealed on-chain by spending from the address.
+- The WIF for an authorized Legacy P2PKH or strict ECDSA witness-v3 identity. Reveal its public key on-chain by spending from that exact address. Strict ECDSA requires a compressed key.
 
 Connect Wi-Fi and synchronize the device's UTC clock before requesting
 challenges. Keep private keys and Wi-Fi credentials in local configuration or
@@ -63,8 +62,11 @@ automatically accept a replacement pin.
 
 The following application fragments assume Wi-Fi is connected and the clock
 is synchronized. Replace every placeholder with settings for the same pool.
-The client defaults to testnet/regtest address encoding; use `setNetwork()`
-before `begin()` if your deployment requires another network.
+The client defaults to testnet genesis and Legacy P2PKH. For regtest, call
+`client.setExpectedGenesis(hash)` with the trusted result of `getblockhash 0`
+before `begin()`. Testnet and regtest share address prefixes. For a strict
+ECDSA holder call `client.setStrictEcdsa(true)` before `begin()`. The same
+key can hold independent memberships at its Legacy and strict addresses.
 
 ```cpp
 #include <NeuraiDepinClient.h>
@@ -124,20 +126,21 @@ When `lastError()` is `depin::Err::RateLimited`, defer retries according to
 
 ### Pagination and memory
 
-Use `page.nextCursor` rather than the last delivered message's hash: the
-transport cursor can also account for examined rows that were rejected.
-`page.messages` contains successfully verified and decrypted messages;
-`page.rejected` reports rows that were not delivered.
+An empty cursor starts a `depinreceiveseq` read. Persist the entire
+`page.nextCursor` string, including after an empty successful poll. It
+contains the pool stream ID, 64-bit admission sequence, scope, address and
+timestamp filter. `shouldContinue` follows the authenticated `has_more`
+flag. Restarting from an empty cursor rereads retained history.
 
-Follow `page.shouldContinue`, not just `page.serverHasMore`. Some node versions
-report `has_more=false` for a full page, so the client conservatively requests
-another page. An empty final page is expected when the total is an exact
-multiple of the page size.
+The client checks the signed page and cursor, verifies each sender using
+the row's `sender_pubkey_hex`, and decrypts for the configured destination.
+`page.rejected` counts rows that failed message validation or decryption.
+On a failed page, retain the previously committed cursor.
 
 A page limit bounds the number of rows, not their byte size. Configure
 `client.limits()` and `setMaxResponseBytes()` before `begin()`, and measure
-memory with your intended payload sizes and recipient counts. Two messages
-per page is a tested starting point, not a guarantee for every workload.
+memory with your intended payload sizes and recipient counts. The default page size is two. `limits().maxReplyJson` bounds the decoded
+page, and `setMaxResponseBytes()` bounds the HTTP body.
 
 ## Codec API
 
@@ -146,21 +149,26 @@ per page is a tested starting point, not a guarantee for every workload.
 | Method | Purpose |
 | --- | --- |
 | `buildDepinMessage(params)` | Encrypt content for recipients and sign the serialized message |
-| `wrapMessageForServer(messageHex, poolKey)` | Encrypt the signed message's ASCII hex for submission to the pool |
-| `parseDepinMessage(messageHex, out)` | Parse the serialized message |
+| `wrapMessageForServer(genesis, messageHex, poolKey)` | Encrypt the signed message's ASCII hex for submission to the pool |
+| `parseDepinMessage(genesis, messageHex, out)` | Parse the serialized message |
 | `fromRpcFields(...)` | Normalize an RPC row and check its announced hash |
 | `verifyDepinMessage(message, senderKey)` | Verify the sender signature and address/key correspondence |
-| `decryptPayload(payloadHex, privateKey)` | Decrypt the recipient's ECIES payload |
+| `decryptPayload(parsedMessage, recipientAddress, privateKey)` | Derive the message context and decrypt for the exact destination |
 
-`DepinParams` accepts a token, sender address and public key, WIF or hex private
+`DepinParams` requires the display-order, lowercase genesis hash in `genesis`, a token, sender address and public key, WIF or hex private
 key, timestamp in **Unix seconds**, content, recipient public keys, and a
 `group` or `private` message type. It includes the sender as a recipient by
-default. Check `DepinMessageResult::ok()` and `NeuraiDepinMsg::lastErrorName()`.
+default. Supply `recipientAddresses` alongside `recipientPubKeys` to select
+exact destinations, including strict ECDSA. A public key alone selects its
+Legacy address in that SEC serialization. Check `DepinMessageResult::ok()` and `NeuraiDepinMsg::lastErrorName()`.
 
-`result.hex` is the signed serialized message; it is **not the complete
-Protocol 2 submission request**. A custom transport must also implement the
-pool envelope and authenticated RPC flow. Parsing or decrypting alone does
-not establish sender authenticity: verify the signature as well.
+`result.hex` is the signed wire message. To submit it with a custom
+transport, wrap its ASCII hex for the pool using the submit context and
+sign the RPC 6 request. Pass the trusted genesis to `fromRpcFields()` or
+`parseDepinMessage()` on receive. Verify the DER signature before delivering
+the result of `decryptPayload()` to the application.
+
+Bootstrap requires a pool advertising protocol 6 and ECIES format 3 during bootstrap.
 
 ## Wallet-owned identities
 
@@ -191,19 +199,21 @@ external identity API currently applies to the codec.
 ## Examples and validation
 
 - [Basic host tests](tests/README.md): codec, authentication, and client regression tests. After installing the documented dependencies, run `make -C tests run`. No board, node, or credentials are required.
-- [EasyMessaging](examples/EasyMessaging/EasyMessaging.ino): Wi-Fi client setup, publishing, and polling. Replace its Wi-Fi, WIF, token, pool-key, and CA placeholders with a consistent configuration. Its example token and key are not a verified pin for the public URL shown. Configure a CA for verified TLS; the sketch's insecure fallback is for lab use only.
-- [ProtocolVectors](examples/ProtocolVectors/ProtocolVectors.ino): offline protocol vectors with heap, stack, and timing output. Embedded keys are public regtest fixtures and must never hold funds.
+- [EasyMessaging](examples/EasyMessaging/EasyMessaging.ino): Wi-Fi client setup, publishing, and polling. Replace its Wi-Fi, WIF, token, pool-key, and CA placeholders with a consistent configuration. Configure a CA for verified TLS; the sketch's insecure fallback is for lab use only.
+- [ProtocolVectors](examples/ProtocolVectors/ProtocolVectors.ino): offline verification and decryption of Core's format-3 known-answer message. The embedded test key is public.
 
-On an ESP32-S3 with PSRAM disabled, the protocol vectors passed **32 checks**.
-A separate Wi-Fi/HTTPS regtest run completed pinned bootstrap, group/private
-publication, and verification and decryption of six messages across pages of
-**2 + 2 + 2 + 0**. JavaScript **3.1.0** independently verified and decrypted
-the same messages against a real Neurai node running in Docker.
+The host suite includes Core's RPC 6 and format-3 fixtures. The portable
+codec also exchanged signed messages in both directions with JavaScript SDK
+5.0.0. Both Arduino examples compiled for ESP32-S3.
 
-These results cover the tested workloads. Public testnet operation, maximum
-payload/recipient sizing, and sustained hardware stress testing remain pending.
-The basic host suite is included in `tests/`. Docker and hardware integration
-tools are maintained separately in the local, unpublished `test/` directory.
+On a physical ESP32-S3 rev. 0.2, the codec verified and decrypted Core's
+format-3 reference message and rejected a modified timestamp. The portable
+client ran in RAM against two `DePIN-Test` regtest nodes at `ad83bd8`.
+The S3 authenticated the pool, published a group message from a Legacy
+holder and a private message from a strict ECDSA holder, and verified and
+decrypted both messages for each holder using one-row pages. RPC requests
+used a USB bridge. Wi-Fi/TLS operation and heap use during HTTPS requests
+remain untested on the board.
 
 ## License
 
